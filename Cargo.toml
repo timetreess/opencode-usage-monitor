@@ -1,18 +1,18 @@
 [package]
-name = "claude-code-usage-monitor"
+name = "opencode-usage-monitor"
 version = "1.2.6"
 edition = "2021"
 license = "MIT"
-description = "Windows taskbar widget for monitoring Claude Code and Codex usage and rate limits"
+description = "Windows taskbar widget for monitoring OpenCode, Claude Code, and Codex usage"
 homepage = "https://github.com/disc0nnctd/Claude-Code-Usage-Monitor"
 repository = "https://github.com/disc0nnctd/Claude-Code-Usage-Monitor"
 
 [package.metadata.winres]
 CompanyName = "Code Zeno Pty Ltd"
-ProductName = "Claude Code Usage Monitor"
-FileDescription = "Windows taskbar widget for monitoring Claude Code usage and rate limits"
-OriginalFilename = "claude-code-usage-monitor.exe"
-InternalName = "ClaudeCodeUsageMonitor"
+ProductName = "OpenCode Usage Monitor"
+FileDescription = "Windows taskbar widget for monitoring OpenCode, Claude Code, and Codex usage"
+OriginalFilename = "opencode-usage-monitor.exe"
+InternalName = "OpencodeUsageMonitor"
 Comments = "https://codezeno.com.au"
 LegalCopyright = "Copyright (C) 2026 Code Zeno Pty Ltd"
 
@@ -22,6 +22,8 @@ native-tls = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
+rusqlite = { version = "0.39", features = ["bundled"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dependencies.windows]
 version = "0.58"

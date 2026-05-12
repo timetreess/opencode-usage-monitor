@@ -21,6 +21,7 @@ pub const TIMER_RESET_POLL: usize = 3;
 // Custom messages
 pub const WM_APP: u32 = 0x8000;
 pub const WM_APP_USAGE_UPDATED: u32 = WM_APP + 1;
+pub const WM_APP_TRAY_ICON: u32 = WM_APP + 3;
 
 /// Get the taskbar window handle
 pub fn find_taskbar() -> Option<HWND> {

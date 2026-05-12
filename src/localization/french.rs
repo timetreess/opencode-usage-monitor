@@ -3,7 +3,7 @@ use super::Strings;
 pub(super) const UPDATE_VIA_WINGET_LABEL: &str = "Mettre à jour avec WinGet";
 
 pub(super) const STRINGS: Strings = Strings {
-    window_title: "Moniteur d'utilisation Claude et Codex",
+    window_title: "Moniteur d'utilisation OpenCode",
     refresh: "Actualiser",
     update_frequency: "Fréquence de mise à jour",
     one_minute: "1 minute",
@@ -25,7 +25,8 @@ pub(super) const STRINGS: Strings = Strings {
     applying_update: "Application de la mise à jour...",
     update_to: "Mettre à jour vers",
     update_available: "Mise à jour disponible",
-    update_prompt_now: "La version {version} est disponible. Voulez-vous mettre à jour maintenant ?",
+    update_prompt_now:
+        "La version {version} est disponible. Voulez-vous mettre à jour maintenant ?",
     exit: "Quitter",
     session_window: "5h",
     weekly_window: "7d",

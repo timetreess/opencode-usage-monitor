@@ -15,6 +15,10 @@ use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Accessibility::HWINEVENTHOOK;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Shell::{
+    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NOTIFYICONDATAW,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::diagnose;
@@ -24,11 +28,12 @@ use crate::models::{
     ActivitySummary, HistoryStorageMode, HistorySyncSettings, ProviderKind, UsageData,
 };
 use crate::native_interop::{
-    self, Color, TIMER_COUNTDOWN, TIMER_POLL, TIMER_RESET_POLL, WM_APP_USAGE_UPDATED,
+    self, Color, TIMER_COUNTDOWN, TIMER_POLL, TIMER_RESET_POLL, WM_APP_TRAY_ICON,
+    WM_APP_USAGE_UPDATED,
 };
-use crate::{codex_poller, poller, secret_store};
 use crate::theme;
 use crate::updater::{self, InstallChannel, ReleaseDescriptor, UpdateCheckResult};
+use crate::{poller, provider_adapter, secret_store};
 
 /// Wrapper to make HWND sendable across threads (safe for PostMessage usage)
 #[derive(Clone, Copy)]
@@ -50,6 +55,7 @@ struct AppState {
     hwnd: SendHwnd,
     taskbar_hwnd: Option<HWND>,
     tray_notify_hwnd: Option<HWND>,
+    tray_icon_added: bool,
     win_event_hook: Option<HWINEVENTHOOK>,
     is_dark: bool,
     embedded: bool,
@@ -60,6 +66,7 @@ struct AppState {
     history_sync: HistorySyncSettings,
     claude: ProviderState,
     codex: ProviderState,
+    opencode: ProviderState,
 
     poll_interval_ms: u32,
     retry_count: u32,
@@ -122,6 +129,7 @@ const IDM_RESET_POSITION: u16 = 30;
 const IDM_VERSION_ACTION: u16 = 31;
 const IDM_PROVIDER_CLAUDE: u16 = 32;
 const IDM_PROVIDER_CODEX: u16 = 33;
+const IDM_PROVIDER_OPENCODE: u16 = 34;
 const IDM_LANG_SYSTEM: u16 = 40;
 const IDM_LANG_ENGLISH: u16 = 41;
 const IDM_LANG_SPANISH: u16 = 42;
@@ -189,6 +197,7 @@ fn provider_state(state: &AppState, provider: ProviderKind) -> &ProviderState {
     match provider {
         ProviderKind::Claude => &state.claude,
         ProviderKind::Codex => &state.codex,
+        ProviderKind::OpenCode => &state.opencode,
     }
 }
 
@@ -196,6 +205,7 @@ fn provider_state_mut(state: &mut AppState, provider: ProviderKind) -> &mut Prov
     match provider {
         ProviderKind::Claude => &mut state.claude,
         ProviderKind::Codex => &mut state.codex,
+        ProviderKind::OpenCode => &mut state.opencode,
     }
 }
 
@@ -210,7 +220,7 @@ fn active_provider_state_mut(state: &mut AppState) -> &mut ProviderState {
 fn settings_path() -> PathBuf {
     let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(appdata)
-        .join("ClaudeCodeUsageMonitor")
+        .join("OpencodeUsageMonitor")
         .join("settings.json")
 }
 
@@ -277,7 +287,11 @@ fn save_state_settings() {
     }
 }
 
-fn refresh_provider_usage_texts(provider_state: &mut ProviderState, strings: Strings) {
+fn refresh_provider_usage_texts(
+    provider: ProviderKind,
+    provider_state: &mut ProviderState,
+    strings: Strings,
+) {
     if !provider_state.last_poll_ok {
         return;
     }
@@ -286,14 +300,22 @@ fn refresh_provider_usage_texts(provider_state: &mut ProviderState, strings: Str
         return;
     };
 
-    provider_state.session_text = poller::format_line(&data.session, strings);
-    provider_state.weekly_text = poller::format_line(&data.weekly, strings);
+    if provider == ProviderKind::OpenCode {
+        if let Some(windows) = data.opencode_windows.as_ref() {
+            provider_state.session_text = format_token_window_line(&windows.five_hour);
+            provider_state.weekly_text = format_token_window_line(&windows.today);
+        }
+    } else {
+        provider_state.session_text = poller::format_line(&data.session, strings);
+        provider_state.weekly_text = poller::format_line(&data.weekly, strings);
+    }
 }
 
 fn refresh_usage_texts(state: &mut AppState) {
     let strings = state.language.strings();
-    refresh_provider_usage_texts(&mut state.claude, strings);
-    refresh_provider_usage_texts(&mut state.codex, strings);
+    refresh_provider_usage_texts(ProviderKind::Claude, &mut state.claude, strings);
+    refresh_provider_usage_texts(ProviderKind::Codex, &mut state.codex, strings);
+    refresh_provider_usage_texts(ProviderKind::OpenCode, &mut state.opencode, strings);
 }
 
 fn set_provider_data(
@@ -302,6 +324,10 @@ fn set_provider_data(
     data: UsageData,
     activity: Option<ActivitySummary>,
 ) {
+    if provider == ProviderKind::OpenCode {
+        write_daily_opencode_log(&data);
+    }
+
     let provider_state = provider_state_mut(state, provider);
     provider_state.session_percent = data.session.percentage;
     provider_state.weekly_percent = data.weekly.percentage;
@@ -324,25 +350,10 @@ fn set_provider_unavailable(state: &mut AppState, provider: ProviderKind) {
     provider_state.last_poll_ok = false;
 }
 
-fn auto_select_active_provider(state: &mut AppState) {
-    if active_provider_state(state).last_poll_ok {
-        return;
-    }
-
-    for provider in ProviderKind::ALL {
-        if provider == state.active_provider {
-            continue;
-        }
-
-        if provider_state(state, provider).last_poll_ok {
-            state.active_provider = provider;
-            break;
-        }
-    }
-}
-
 fn provider_is_selectable(provider_state: &ProviderState) -> bool {
-    provider_state.last_poll_ok || provider_state.data.is_some() || provider_state.activity.is_some()
+    provider_state.last_poll_ok
+        || provider_state.data.is_some()
+        || provider_state.activity.is_some()
 }
 
 fn cycle_active_provider(state: &mut AppState) -> bool {
@@ -368,10 +379,20 @@ fn provider_name(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Claude => "Claude",
         ProviderKind::Codex => "Codex",
+        ProviderKind::OpenCode => "OpenCode",
     }
 }
 
 fn provider_summary_line(provider: ProviderKind, provider_state: &ProviderState) -> String {
+    if provider == ProviderKind::OpenCode {
+        return format!(
+            "{}: 5h {} | Today {}",
+            provider_name(provider),
+            provider_state.session_text,
+            provider_state.weekly_text
+        );
+    }
+
     format!(
         "{}: 5h {} | 7d {}",
         provider_name(provider),
@@ -381,6 +402,19 @@ fn provider_summary_line(provider: ProviderKind, provider_state: &ProviderState)
 }
 
 fn provider_raw_usage_line(provider: ProviderKind, data: &UsageData) -> String {
+    if provider == ProviderKind::OpenCode {
+        if let Some(windows) = data.opencode_windows.as_ref() {
+            return format!(
+                "OpenCode month: {} in / {} out / {} reasoning / {} cache · {}",
+                format_token_count(windows.month.input_tokens),
+                format_token_count(windows.month.output_tokens),
+                format_token_count(windows.month.reasoning_output_tokens),
+                format_token_count(windows.month.cached_input_tokens),
+                format_cost(windows.month.estimated_cost_usd)
+            );
+        }
+    }
+
     let s_used = data.session.percentage.clamp(0.0, 100.0);
     let s_remaining = (100.0 - s_used).max(0.0);
     let w_used = data.weekly.percentage.clamp(0.0, 100.0);
@@ -394,6 +428,153 @@ fn provider_raw_usage_line(provider: ProviderKind, data: &UsageData) -> String {
         w_used,
         w_remaining
     )
+}
+
+fn opencode_detail_lines(data: &UsageData) -> Vec<String> {
+    let Some(windows) = data.opencode_windows.as_ref() else {
+        return Vec::new();
+    };
+
+    vec![
+        format_opencode_detail_line("OpenCode 5h", &windows.five_hour),
+        format_opencode_detail_line("OpenCode today", &windows.today),
+        format_opencode_detail_line("OpenCode month", &windows.month),
+    ]
+}
+
+fn format_opencode_detail_line(label: &str, usage: &crate::models::TokenWindowUsage) -> String {
+    format!(
+        "{label}: {} total ({} in, {} out, {} reasoning, {} cache) · {}",
+        format_token_count(usage.total_tokens()),
+        format_token_count(usage.input_tokens),
+        format_token_count(usage.output_tokens),
+        format_token_count(usage.reasoning_output_tokens),
+        format_token_count(usage.cached_input_tokens),
+        format_cost(usage.estimated_cost_usd)
+    )
+}
+
+fn format_token_window_line(usage: &crate::models::TokenWindowUsage) -> String {
+    format!(
+        "{} {}",
+        format_token_count(usage.total_tokens()),
+        format_cost(usage.estimated_cost_usd)
+    )
+}
+
+fn format_token_count(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}k", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
+}
+
+fn format_cost(value: f64) -> String {
+    if value <= 0.0 {
+        "$0.00".to_string()
+    } else if value < 0.01 {
+        format!("${value:.4}")
+    } else {
+        format!("${value:.2}")
+    }
+}
+
+fn write_daily_opencode_log(data: &UsageData) {
+    let Some(windows) = data.opencode_windows.as_ref() else {
+        return;
+    };
+
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let folder = daily_log_folder_path();
+    if let Err(error) = std::fs::create_dir_all(&folder) {
+        diagnose::log(format!(
+            "OpenCode daily log folder create failed for {}: {error}",
+            folder.display()
+        ));
+        return;
+    }
+
+    let source = data.source_label.as_deref().unwrap_or("opencode-db");
+    let generated_at = chrono::Local::now().to_rfc3339();
+    let markdown = format!(
+        "# OpenCode Token Usage - {today}\n\n\
+Generated: {generated_at}\n\
+Source: `{source}`\n\n\
+| Window | Total | Input | Output | Reasoning | Cache | Estimated Cost |\n\
+|---|---:|---:|---:|---:|---:|---:|\n\
+| 5h | {} | {} | {} | {} | {} | {} |\n\
+| Today | {} | {} | {} | {} | {} | {} |\n\
+| Month | {} | {} | {} | {} | {} | {} |\n",
+        format_token_count(windows.five_hour.total_tokens()),
+        format_token_count(windows.five_hour.input_tokens),
+        format_token_count(windows.five_hour.output_tokens),
+        format_token_count(windows.five_hour.reasoning_output_tokens),
+        format_token_count(windows.five_hour.cached_input_tokens),
+        format_cost(windows.five_hour.estimated_cost_usd),
+        format_token_count(windows.today.total_tokens()),
+        format_token_count(windows.today.input_tokens),
+        format_token_count(windows.today.output_tokens),
+        format_token_count(windows.today.reasoning_output_tokens),
+        format_token_count(windows.today.cached_input_tokens),
+        format_cost(windows.today.estimated_cost_usd),
+        format_token_count(windows.month.total_tokens()),
+        format_token_count(windows.month.input_tokens),
+        format_token_count(windows.month.output_tokens),
+        format_token_count(windows.month.reasoning_output_tokens),
+        format_token_count(windows.month.cached_input_tokens),
+        format_cost(windows.month.estimated_cost_usd),
+    );
+
+    let json = format!(
+        "{{\n\
+  \"date\": \"{}\",\n\
+  \"generated_at\": \"{}\",\n\
+  \"source\": \"{}\",\n\
+  \"five_hour\": {},\n\
+  \"today\": {},\n\
+  \"month\": {}\n\
+}}\n",
+        json_escape(&today),
+        json_escape(&generated_at),
+        json_escape(source),
+        token_window_json(&windows.five_hour),
+        token_window_json(&windows.today),
+        token_window_json(&windows.month),
+    );
+
+    for (extension, content) in [("md", markdown), ("json", json)] {
+        let path = folder.join(format!("{today}.{extension}"));
+        if let Err(error) = std::fs::write(&path, content) {
+            diagnose::log(format!(
+                "OpenCode daily log write failed for {}: {error}",
+                path.display()
+            ));
+        }
+    }
+}
+
+fn token_window_json(usage: &crate::models::TokenWindowUsage) -> String {
+    format!(
+        "{{\"total_tokens\":{},\"input_tokens\":{},\"output_tokens\":{},\"reasoning_output_tokens\":{},\"cached_input_tokens\":{},\"estimated_cost_usd\":{:.6},\"unpriced_rows\":{}}}",
+        usage.total_tokens(),
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.reasoning_output_tokens,
+        usage.cached_input_tokens,
+        usage.estimated_cost_usd,
+        usage.unpriced_rows
+    )
+}
+
+fn json_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 fn credits_text(data: &UsageData) -> Option<String> {
@@ -423,7 +604,11 @@ fn activity_lines(activity: &ActivitySummary) -> Vec<String> {
         ),
     ];
 
-    if let Some(last_prompt) = activity.last_prompt.as_deref().filter(|value| !value.is_empty()) {
+    if let Some(last_prompt) = activity
+        .last_prompt
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
         let suffix = activity
             .last_prompt_at
             .map(relative_time_text)
@@ -479,12 +664,7 @@ fn relative_time_text(timestamp: SystemTime) -> String {
 fn append_disabled_menu_line(menu: HMENU, text: &str) {
     unsafe {
         let label = native_interop::wide_str(text);
-        let _ = AppendMenuW(
-            menu,
-            MF_GRAYED,
-            0,
-            PCWSTR::from_raw(label.as_ptr()),
-        );
+        let _ = AppendMenuW(menu, MF_GRAYED, 0, PCWSTR::from_raw(label.as_ptr()));
     }
 }
 
@@ -711,6 +891,10 @@ fn app_data_folder_path() -> PathBuf {
 
 fn local_history_folder_path() -> PathBuf {
     app_data_folder_path().join("history")
+}
+
+fn daily_log_folder_path() -> PathBuf {
+    app_data_folder_path().join("log")
 }
 
 fn reports_folder_path() -> PathBuf {
@@ -1075,7 +1259,7 @@ fn begin_winget_update(hwnd: HWND) {
 }
 
 const STARTUP_REGISTRY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-const STARTUP_REGISTRY_KEY: &str = "ClaudeCodeUsageMonitor";
+const STARTUP_REGISTRY_KEY: &str = "OpencodeUsageMonitor";
 
 /// Returns true only if the startup registry value points to this executable.
 fn is_startup_enabled() -> bool {
@@ -1210,7 +1394,7 @@ const PROVIDER_BADGE_RIGHT_MARGIN: i32 = 8;
 const LABEL_WIDTH: i32 = 18;
 const LABEL_RIGHT_MARGIN: i32 = 10;
 const BAR_RIGHT_MARGIN: i32 = 4;
-const TEXT_WIDTH: i32 = 62;
+const TEXT_WIDTH: i32 = 82;
 const RIGHT_MARGIN: i32 = 1;
 const WIDGET_HEIGHT: i32 = 46;
 
@@ -1232,6 +1416,7 @@ fn provider_accent(provider: ProviderKind) -> Color {
     match provider {
         ProviderKind::Claude => Color::from_hex("#D97757"),
         ProviderKind::Codex => Color::from_hex("#10A37F"),
+        ProviderKind::OpenCode => Color::from_hex("#4F8CFF"),
     }
 }
 
@@ -1247,6 +1432,11 @@ fn provider_badge_palette(provider: ProviderKind) -> (Color, Color, Color) {
             Color::from_hex("#0A6A52"), // border
             Color::from_hex("#FFFFFF"), // text
         ),
+        ProviderKind::OpenCode => (
+            Color::from_hex("#4F8CFF"), // fill
+            Color::from_hex("#2459B8"), // border
+            Color::from_hex("#FFFFFF"), // text
+        ),
     }
 }
 
@@ -1259,7 +1449,7 @@ pub fn run() {
     diagnose::log("window::run started");
 
     // Single-instance guard: silently exit if another instance is running
-    let mutex_name = native_interop::wide_str("Global\\ClaudeCodeUsageMonitor");
+    let mutex_name = native_interop::wide_str("Global\\OpencodeUsageMonitor");
     let _mutex = unsafe {
         let handle = CreateMutexW(None, false, PCWSTR::from_raw(mutex_name.as_ptr()));
         match handle {
@@ -1271,13 +1461,16 @@ pub fn run() {
                 h
             }
             Err(error) => {
-                diagnose::log_error("startup aborted: unable to create single-instance mutex", error);
+                diagnose::log_error(
+                    "startup aborted: unable to create single-instance mutex",
+                    error,
+                );
                 return;
             }
         }
     };
 
-    let class_name = native_interop::wide_str("ClaudeCodeUsageMonitor");
+    let class_name = native_interop::wide_str("OpencodeUsageMonitor");
 
     unsafe {
         let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap();
@@ -1302,7 +1495,7 @@ pub fn run() {
         let language_override = settings.language.as_deref().and_then(LanguageId::from_code);
         let language = localization::resolve_language(language_override);
         let install_channel = updater::current_install_channel();
-        let active_provider = settings.active_provider.unwrap_or(ProviderKind::Claude);
+        let active_provider = settings.active_provider.unwrap_or(ProviderKind::OpenCode);
         let history_sync = settings.history_sync.clone();
 
         // Create as layered popup (will be reparented into taskbar)
@@ -1333,6 +1526,7 @@ pub fn run() {
                 hwnd: SendHwnd::from_hwnd(hwnd),
                 taskbar_hwnd: None,
                 tray_notify_hwnd: None,
+                tray_icon_added: false,
                 win_event_hook: None,
                 is_dark,
                 embedded: false,
@@ -1343,6 +1537,7 @@ pub fn run() {
                 history_sync,
                 claude: ProviderState::default(),
                 codex: ProviderState::default(),
+                opencode: ProviderState::default(),
                 poll_interval_ms: settings.poll_interval_ms,
                 retry_count: 0,
                 update_status: UpdateStatus::Idle,
@@ -1404,6 +1599,7 @@ pub fn run() {
         position_at_taskbar();
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         diagnose::log("window shown");
+        refresh_tray_icon();
 
         // Initial render via UpdateLayeredWindow (for embedded) or InvalidateRect (fallback)
         render_layered();
@@ -1534,19 +1730,21 @@ fn render_layered() {
         // sub-pixel font rendering that matches the rest of the OS.
         paint_content(
             mem_dc,
-            width,
-            height,
-            is_dark,
-            &bg_color,
-            &text_color,
-            &accent,
-            &track,
-            strings,
-            active_provider,
-            session_pct,
-            &session_text,
-            weekly_pct,
-            &weekly_text,
+            PaintContentArgs {
+                width,
+                height,
+                is_dark,
+                bg: &bg_color,
+                text_color: &text_color,
+                accent: &accent,
+                track: &track,
+                strings,
+                active_provider,
+                session_pct,
+                session_text: &session_text,
+                weekly_pct,
+                weekly_text: &weekly_text,
+            },
         );
 
         // Background pixels → alpha 1 (nearly invisible but still hittable for right-click).
@@ -1596,22 +1794,39 @@ fn render_layered() {
 }
 
 /// Paint all widget content onto a DC with a given background color.
-fn paint_content(
-    hdc: HDC,
+struct PaintContentArgs<'a> {
     width: i32,
     height: i32,
     is_dark: bool,
-    bg: &Color,
-    text_color: &Color,
-    accent: &Color,
-    track: &Color,
+    bg: &'a Color,
+    text_color: &'a Color,
+    accent: &'a Color,
+    track: &'a Color,
     strings: Strings,
     active_provider: ProviderKind,
     session_pct: f64,
-    session_text: &str,
+    session_text: &'a str,
     weekly_pct: f64,
-    weekly_text: &str,
-) {
+    weekly_text: &'a str,
+}
+
+fn paint_content(hdc: HDC, args: PaintContentArgs<'_>) {
+    let PaintContentArgs {
+        width,
+        height,
+        is_dark,
+        bg,
+        text_color,
+        accent,
+        track,
+        strings,
+        active_provider,
+        session_pct,
+        session_text,
+        weekly_pct,
+        weekly_text,
+    } = args;
+
     unsafe {
         let client_rect = RECT {
             left: 0,
@@ -1696,25 +1911,33 @@ fn paint_content(
         );
         let old_font = SelectObject(hdc, font);
 
+        let (row1_label, row2_label) = if active_provider == ProviderKind::OpenCode {
+            ("5h", "Day")
+        } else {
+            (strings.session_window, strings.weekly_window)
+        };
+
         draw_row(
             hdc,
             rows_x,
             row1_y,
-            strings.session_window,
-            session_pct,
-            session_text,
-            accent,
-            track,
+            RowRender {
+                label: row1_label,
+                percent: session_pct,
+                text: session_text,
+            },
+            RowColors { accent, track },
         );
         draw_row(
             hdc,
             rows_x,
             row2_y,
-            strings.weekly_window,
-            weekly_pct,
-            weekly_text,
-            accent,
-            track,
+            RowRender {
+                label: row2_label,
+                percent: weekly_pct,
+                text: weekly_text,
+            },
+            RowColors { accent, track },
         );
 
         SelectObject(hdc, old_font);
@@ -1724,18 +1947,14 @@ fn paint_content(
 
 fn do_poll(send_hwnd: SendHwnd) {
     let hwnd = send_hwnd.to_hwnd();
-    let claude_handle = std::thread::spawn(poller::poll);
-    let codex_handle = std::thread::spawn(|| {
-        let activity = codex_poller::read_activity_summary();
-        (codex_poller::poll(), activity)
-    });
-
-    let claude_result = claude_handle
-        .join()
-        .unwrap_or(Err(poller::PollError::RequestFailed));
-    let (codex_result, codex_activity) = codex_handle
-        .join()
-        .unwrap_or((Err(codex_poller::PollError::RequestFailed), None));
+    let provider = {
+        let state = lock_state();
+        state
+            .as_ref()
+            .map(|s| s.active_provider)
+            .unwrap_or(ProviderKind::OpenCode)
+    };
+    let handle = std::thread::spawn(move || provider_adapter::poll_provider(provider));
 
     let mut any_ok = false;
     let mut needs_fast_reset_poll = false;
@@ -1743,43 +1962,26 @@ fn do_poll(send_hwnd: SendHwnd) {
     {
         let mut state = lock_state();
         if let Some(s) = state.as_mut() {
-            match claude_result {
-                Ok(data) => {
-                    needs_fast_reset_poll |= poller::is_past_reset(&data);
-                    set_provider_data(s, ProviderKind::Claude, data, None);
-                    any_ok = true;
-                }
-                Err(poller::PollError::NoCredentials | poller::PollError::TokenExpired) => {
-                    set_provider_unavailable(s, ProviderKind::Claude);
-                }
-                Err(poller::PollError::RequestFailed) => {
-                    set_provider_loading(s, ProviderKind::Claude);
-                }
-            }
-
-                // Recovered from errors — restore normal poll interval
-            provider_state_mut(s, ProviderKind::Codex).activity = codex_activity;
-            match codex_result {
-                Ok(data) => {
-                    needs_fast_reset_poll |= poller::is_past_reset(&data);
-                    set_provider_data(
-                        s,
-                        ProviderKind::Codex,
-                        data,
-                        provider_state(s, ProviderKind::Codex).activity.clone(),
-                    );
-                    any_ok = true;
-                }
-                Err(codex_poller::PollError::NoCredentials | codex_poller::PollError::CliUnavailable) => {
-                    set_provider_unavailable(s, ProviderKind::Codex);
-                }
-                Err(codex_poller::PollError::RequestFailed) => {
-                    set_provider_loading(s, ProviderKind::Codex);
+            if let Ok(result) = handle.join() {
+                provider_state_mut(s, result.provider).activity = result.activity.clone();
+                match result.data {
+                    Ok(data) => {
+                        if result.provider != ProviderKind::OpenCode {
+                            needs_fast_reset_poll |= poller::is_past_reset(&data);
+                        }
+                        set_provider_data(s, result.provider, data, result.activity);
+                        any_ok = true;
+                    }
+                    Err(provider_adapter::ProviderPollError::Unavailable) => {
+                        set_provider_unavailable(s, result.provider);
+                    }
+                    Err(provider_adapter::ProviderPollError::Loading) => {
+                        set_provider_loading(s, result.provider);
+                    }
                 }
             }
 
             refresh_usage_texts(s);
-            auto_select_active_provider(s);
             if any_ok {
                 if s.retry_count > 0 {
                     s.retry_count = 0;
@@ -1801,7 +2003,7 @@ fn do_poll(send_hwnd: SendHwnd) {
     }
 
     unsafe {
-            // Show refresh indicator — retry will recover silently
+        // Show refresh indicator — retry will recover silently
         if needs_fast_reset_poll {
             SetTimer(hwnd, TIMER_RESET_POLL, 5_000, None);
         } else {
@@ -1896,6 +2098,77 @@ fn update_display() {
     }
 
     refresh_usage_texts(s);
+}
+
+fn refresh_tray_icon() {
+    let (hwnd, added, tooltip) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else { return };
+        (s.hwnd.to_hwnd(), s.tray_icon_added, tray_tooltip_text(s))
+    };
+
+    let data = build_notify_icon_data(hwnd, &tooltip);
+    let result = unsafe {
+        if added {
+            Shell_NotifyIconW(NIM_MODIFY, &data)
+        } else {
+            Shell_NotifyIconW(NIM_ADD, &data)
+        }
+    };
+
+    if result.as_bool() && !added {
+        let mut state = lock_state();
+        if let Some(s) = state.as_mut() {
+            s.tray_icon_added = true;
+        }
+    }
+}
+
+fn remove_tray_icon() {
+    let (hwnd, added) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else { return };
+        (s.hwnd.to_hwnd(), s.tray_icon_added)
+    };
+    if !added {
+        return;
+    }
+
+    let data = build_notify_icon_data(hwnd, "");
+    let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &data) };
+}
+
+fn build_notify_icon_data(hwnd: HWND, tooltip: &str) -> NOTIFYICONDATAW {
+    let mut data = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: 1,
+        uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
+        uCallbackMessage: WM_APP_TRAY_ICON,
+        ..Default::default()
+    };
+
+    data.hIcon = unsafe { LoadIconW(HINSTANCE::default(), IDI_APPLICATION).unwrap_or_default() };
+    let tip = native_interop::wide_str(&trim_for_menu(tooltip, data.szTip.len().saturating_sub(1)));
+    for (index, value) in tip.into_iter().take(data.szTip.len()).enumerate() {
+        data.szTip[index] = value;
+    }
+    data
+}
+
+fn tray_tooltip_text(state: &AppState) -> String {
+    let provider = state.active_provider;
+    let provider_state = active_provider_state(state);
+    let mut lines = vec![format!("{} Usage", provider_name(provider))];
+    lines.push(provider_summary_line(provider, provider_state));
+    if provider == ProviderKind::OpenCode {
+        if let Some(data) = provider_state.data.as_ref() {
+            lines.extend(opencode_detail_lines(data));
+        }
+    } else if let Some(data) = provider_state.data.as_ref() {
+        lines.push(provider_raw_usage_line(provider, data));
+    }
+    lines.join("\n")
 }
 
 fn position_at_taskbar() {
@@ -2074,7 +2347,30 @@ unsafe extern "system" fn wnd_proc(
             check_theme_change();
             check_language_change();
             render_layered();
+            refresh_tray_icon();
             schedule_countdown_timer();
+            LRESULT(0)
+        }
+        WM_APP_TRAY_ICON => {
+            let mouse_message = lparam.0 as u32;
+            if mouse_message == WM_RBUTTONUP {
+                show_context_menu(hwnd);
+            } else if mouse_message == WM_LBUTTONUP {
+                let switched = {
+                    let mut state = lock_state();
+                    if let Some(s) = state.as_mut() {
+                        cycle_active_provider(s)
+                    } else {
+                        false
+                    }
+                };
+                if switched {
+                    save_state_settings();
+                    render_layered();
+                    refresh_tray_icon();
+                    schedule_countdown_timer();
+                }
+            }
             LRESULT(0)
         }
         WM_APP_UPDATE_CHECK_COMPLETE => LRESULT(0),
@@ -2155,11 +2451,7 @@ unsafe extern "system" fn wnd_proc(
                             }
                         }
                         let widget_width = total_widget_width();
-                        let max_offset = if s.embedded {
-                            tray_left - taskbar_rect.left - widget_width
-                        } else {
-                            tray_left - taskbar_rect.left - widget_width
-                        };
+                        let max_offset = tray_left - taskbar_rect.left - widget_width;
                         if new_offset > max_offset {
                             new_offset = max_offset;
                         }
@@ -2294,6 +2586,7 @@ unsafe extern "system" fn wnd_proc(
                     }
                 }
                 2 => {
+                    remove_tray_icon();
                     let hook = {
                         let state = lock_state();
                         state.as_ref().and_then(|s| s.win_event_hook)
@@ -2313,11 +2606,11 @@ unsafe extern "system" fn wnd_proc(
                     save_state_settings();
                     position_at_taskbar();
                 }
-                IDM_PROVIDER_CLAUDE | IDM_PROVIDER_CODEX => {
-                    let new_provider = if id == IDM_PROVIDER_CODEX {
-                        ProviderKind::Codex
-                    } else {
-                        ProviderKind::Claude
+                IDM_PROVIDER_CLAUDE | IDM_PROVIDER_CODEX | IDM_PROVIDER_OPENCODE => {
+                    let new_provider = match id {
+                        IDM_PROVIDER_CODEX => ProviderKind::Codex,
+                        IDM_PROVIDER_OPENCODE => ProviderKind::OpenCode,
+                        _ => ProviderKind::Claude,
                     };
                     {
                         let mut state = lock_state();
@@ -2726,6 +3019,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_DESTROY => {
+            remove_tray_icon();
             let hook = {
                 let state = lock_state();
                 state.as_ref().and_then(|s| s.win_event_hook)
@@ -2753,6 +3047,7 @@ fn show_context_menu(hwnd: HWND) {
             history_sync,
             claude_state,
             codex_state,
+            opencode_state,
         ) = {
             let state = lock_state();
             match state.as_ref() {
@@ -2767,6 +3062,7 @@ fn show_context_menu(hwnd: HWND) {
                     s.history_sync.clone(),
                     s.claude.clone(),
                     s.codex.clone(),
+                    s.opencode.clone(),
                 ),
                 None => (
                     POLL_15_MIN,
@@ -2777,6 +3073,7 @@ fn show_context_menu(hwnd: HWND) {
                     UpdateStatus::Idle,
                     ProviderKind::Claude,
                     HistorySyncSettings::default(),
+                    ProviderState::default(),
                     ProviderState::default(),
                     ProviderState::default(),
                 ),
@@ -2797,6 +3094,7 @@ fn show_context_menu(hwnd: HWND) {
         for (provider, id) in [
             (ProviderKind::Claude, IDM_PROVIDER_CLAUDE),
             (ProviderKind::Codex, IDM_PROVIDER_CODEX),
+            (ProviderKind::OpenCode, IDM_PROVIDER_OPENCODE),
         ] {
             let label = native_interop::wide_str(provider_name(provider));
             let flags = if active_provider == provider {
@@ -2821,13 +3119,36 @@ fn show_context_menu(hwnd: HWND) {
         );
 
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        append_disabled_menu_line(menu, &provider_summary_line(ProviderKind::Claude, &claude_state));
-        append_disabled_menu_line(menu, &provider_summary_line(ProviderKind::Codex, &codex_state));
+        append_disabled_menu_line(
+            menu,
+            &provider_summary_line(ProviderKind::Claude, &claude_state),
+        );
+        append_disabled_menu_line(
+            menu,
+            &provider_summary_line(ProviderKind::Codex, &codex_state),
+        );
+        append_disabled_menu_line(
+            menu,
+            &provider_summary_line(ProviderKind::OpenCode, &opencode_state),
+        );
         if let Some(data) = claude_state.data.as_ref() {
             append_disabled_menu_line(menu, &provider_raw_usage_line(ProviderKind::Claude, data));
         }
         if let Some(data) = codex_state.data.as_ref() {
             append_disabled_menu_line(menu, &provider_raw_usage_line(ProviderKind::Codex, data));
+        }
+        if let Some(data) = opencode_state.data.as_ref() {
+            append_disabled_menu_line(menu, &provider_raw_usage_line(ProviderKind::OpenCode, data));
+            for line in opencode_detail_lines(data) {
+                append_disabled_menu_line(menu, &line);
+            }
+            if let Some(source) = data
+                .source_label
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                append_disabled_menu_line(menu, &format!("OpenCode source: {source}"));
+            }
         }
 
         if let Some(data) = codex_state.data.as_ref() {
@@ -2835,7 +3156,11 @@ fn show_context_menu(hwnd: HWND) {
                 append_disabled_menu_line(menu, &format!("Codex plan: {plan}"));
             }
 
-            if let Some(source) = data.source_label.as_deref().filter(|value| !value.is_empty()) {
+            if let Some(source) = data
+                .source_label
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
                 append_disabled_menu_line(menu, &format!("Codex source: {source}"));
             }
 
@@ -3165,15 +3490,7 @@ fn show_context_menu(hwnd: HWND) {
 
 /// Paint for non-embedded fallback (normal WM_PAINT path)
 fn paint(hdc: HDC, hwnd: HWND) {
-    let (
-        is_dark,
-        strings,
-        active_provider,
-        session_pct,
-        session_text,
-        weekly_pct,
-        weekly_text,
-    ) = {
+    let (is_dark, strings, active_provider, session_pct, session_text, weekly_pct, weekly_text) = {
         let state = lock_state();
         match state.as_ref() {
             Some(s) => (
@@ -3222,19 +3539,21 @@ fn paint(hdc: HDC, hwnd: HWND) {
 
         paint_content(
             mem_dc,
-            width,
-            height,
-            is_dark,
-            &bg_color,
-            &text_color,
-            &accent,
-            &track,
-            strings,
-            active_provider,
-            session_pct,
-            &session_text,
-            weekly_pct,
-            &weekly_text,
+            PaintContentArgs {
+                width,
+                height,
+                is_dark,
+                bg: &bg_color,
+                text_color: &text_color,
+                accent: &accent,
+                track: &track,
+                strings,
+                active_provider,
+                session_pct,
+                session_text: &session_text,
+                weekly_pct,
+                weekly_text: &weekly_text,
+            },
         );
 
         let _ = BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
@@ -3245,16 +3564,24 @@ fn paint(hdc: HDC, hwnd: HWND) {
     }
 }
 
-fn draw_row(
-    hdc: HDC,
-    x: i32,
-    y: i32,
-    label: &str,
+struct RowRender<'a> {
+    label: &'a str,
     percent: f64,
-    text: &str,
-    accent: &Color,
-    track: &Color,
-) {
+    text: &'a str,
+}
+
+struct RowColors<'a> {
+    accent: &'a Color,
+    track: &'a Color,
+}
+
+fn draw_row(hdc: HDC, x: i32, y: i32, row: RowRender<'_>, colors: RowColors<'_>) {
+    let RowRender {
+        label,
+        percent,
+        text,
+    } = row;
+    let RowColors { accent, track } = colors;
     let seg_w = sc(SEGMENT_W);
     let seg_h = sc(SEGMENT_H);
     let seg_gap = sc(SEGMENT_GAP);

@@ -8,17 +8,62 @@ pub enum ProviderKind {
     #[default]
     Claude,
     Codex,
+    OpenCode,
 }
 
 impl ProviderKind {
-    pub const ALL: [ProviderKind; 2] = [ProviderKind::Claude, ProviderKind::Codex];
+    pub const ALL: [ProviderKind; 3] = [
+        ProviderKind::Claude,
+        ProviderKind::Codex,
+        ProviderKind::OpenCode,
+    ];
 
     pub fn short_label(self) -> &'static str {
         match self {
             Self::Claude => "C",
             Self::Codex => "O",
+            Self::OpenCode => "OC",
         }
     }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TokenWindowUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_output_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub estimated_cost_usd: f64,
+    pub unpriced_rows: u32,
+}
+
+impl TokenWindowUsage {
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.reasoning_output_tokens)
+            .saturating_add(self.cached_input_tokens)
+    }
+
+    pub fn add(&mut self, usage: &TokenWindowUsage) {
+        self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
+        self.reasoning_output_tokens = self
+            .reasoning_output_tokens
+            .saturating_add(usage.reasoning_output_tokens);
+        self.cached_input_tokens = self
+            .cached_input_tokens
+            .saturating_add(usage.cached_input_tokens);
+        self.estimated_cost_usd += usage.estimated_cost_usd;
+        self.unpriced_rows = self.unpriced_rows.saturating_add(usage.unpriced_rows);
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct OpenCodeUsageWindows {
+    pub five_hour: TokenWindowUsage,
+    pub today: TokenWindowUsage,
+    pub month: TokenWindowUsage,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +134,7 @@ pub struct UsageData {
     pub plan_name: Option<String>,
     pub source_label: Option<String>,
     pub updated_at: Option<SystemTime>,
+    pub opencode_windows: Option<OpenCodeUsageWindows>,
 }
 
 #[derive(Clone, Debug, Default)]

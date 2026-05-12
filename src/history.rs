@@ -1074,8 +1074,7 @@ pub fn archive_history(sync: &HistorySyncSettings, token: &str) -> Result<Archiv
 
     if !sync.upload_history_store && !sync.upload_html_reports && !sync.upload_conversations {
         return Err(
-            "GitHub sync is configured to upload nothing. Enable at least one scope."
-                .to_string(),
+            "GitHub sync is configured to upload nothing. Enable at least one scope.".to_string(),
         );
     }
 
@@ -1125,10 +1124,7 @@ pub fn archive_history(sync: &HistorySyncSettings, token: &str) -> Result<Archiv
         .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
-        match trigger_report_workflow(&repo, token, sync.branch.as_deref(), workflow_file.trim()) {
-            Ok(()) => None,
-            Err(error) => Some(error),
-        }
+        trigger_report_workflow(&repo, token, sync.branch.as_deref(), workflow_file.trim()).err()
     } else {
         None
     };
@@ -1193,7 +1189,8 @@ pub fn install_sample_workflow_to_github(
     Ok(WorkflowInstallResult {
         location: format!(
             "{repo_url} [{}] -> {}",
-            effective_archive_branch(sync.branch.as_deref()).unwrap_or_else(|| "default branch".to_string()),
+            effective_archive_branch(sync.branch.as_deref())
+                .unwrap_or_else(|| "default branch".to_string()),
             remote_path
         ),
     })
@@ -1324,7 +1321,10 @@ fn load_store() -> Result<HistoryStore, String> {
             });
         }
         Err(error) => {
-            return Err(format!("Unable to read history store {}: {error}", path.display()));
+            return Err(format!(
+                "Unable to read history store {}: {error}",
+                path.display()
+            ));
         }
     };
 
@@ -1378,7 +1378,11 @@ fn merge_sessions(store: &mut HistoryStore, incoming: Vec<StoredSessionRecord>) 
             right
                 .last_seen_unix
                 .cmp(&left.last_seen_unix)
-                .then(left.provider.short_label().cmp(right.provider.short_label()))
+                .then(
+                    left.provider
+                        .short_label()
+                        .cmp(right.provider.short_label()),
+                )
                 .then(left.project_path.cmp(&right.project_path))
                 .then(left.id.cmp(&right.id))
         });
@@ -1435,7 +1439,11 @@ fn scan_claude_sessions() -> Vec<StoredSessionRecord> {
             let entry = sessions.entry(session_id.clone()).or_default();
 
             if entry.project_path.is_none() {
-                if let Some(cwd) = record.cwd.as_deref().filter(|value| !value.trim().is_empty()) {
+                if let Some(cwd) = record
+                    .cwd
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                {
                     entry.project_path = Some(cwd.to_string());
                 }
             }
@@ -1444,7 +1452,11 @@ fn scan_claude_sessions() -> Vec<StoredSessionRecord> {
                 continue;
             };
             if entry.model_name.is_none() {
-                if let Some(model) = message.model.as_deref().filter(|value| !value.trim().is_empty()) {
+                if let Some(model) = message
+                    .model
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                {
                     entry.model_name = Some(model.to_string());
                 }
             }
@@ -1469,7 +1481,9 @@ fn scan_claude_sessions() -> Vec<StoredSessionRecord> {
                 ephemeral_1h_input_tokens: 0,
             });
             let cache_write_total = usage.cache_creation_input_tokens;
-            let cache_write_5m = cache_creation.ephemeral_5m_input_tokens.min(cache_write_total);
+            let cache_write_5m = cache_creation
+                .ephemeral_5m_input_tokens
+                .min(cache_write_total);
             let cache_write_1h = cache_creation
                 .ephemeral_1h_input_tokens
                 .min(cache_write_total.saturating_sub(cache_write_5m));
@@ -1480,9 +1494,8 @@ fn scan_claude_sessions() -> Vec<StoredSessionRecord> {
             entry.cache_write_5m_tokens = entry
                 .cache_write_5m_tokens
                 .saturating_add(cache_write_5m.saturating_add(cache_write_remaining));
-            entry.cache_write_1h_tokens = entry
-                .cache_write_1h_tokens
-                .saturating_add(cache_write_1h);
+            entry.cache_write_1h_tokens =
+                entry.cache_write_1h_tokens.saturating_add(cache_write_1h);
             entry.cache_read_tokens = entry
                 .cache_read_tokens
                 .saturating_add(usage.cache_read_input_tokens);
@@ -1556,13 +1569,11 @@ fn scan_codex_sessions() -> Vec<StoredSessionRecord> {
             };
 
             match record.record_type.as_str() {
-                "session_meta" => {
-                    if raw_project_path.is_none() {
-                        if let Ok(payload) =
-                            serde_json::from_value::<CodexSessionMetaPayload>(record.payload)
-                        {
-                            raw_project_path = Some(payload.cwd);
-                        }
+                "session_meta" if raw_project_path.is_none() => {
+                    if let Ok(payload) =
+                        serde_json::from_value::<CodexSessionMetaPayload>(record.payload)
+                    {
+                        raw_project_path = Some(payload.cwd);
                     }
                 }
                 "turn_context" => {
@@ -1578,8 +1589,7 @@ fn scan_codex_sessions() -> Vec<StoredSessionRecord> {
                     }
                 }
                 "event_msg" => {
-                    if let Ok(payload) =
-                        serde_json::from_value::<CodexEventPayload>(record.payload)
+                    if let Ok(payload) = serde_json::from_value::<CodexEventPayload>(record.payload)
                     {
                         if payload.event_type == "token_count" {
                             if let Some(info) = payload.info {
@@ -1588,8 +1598,9 @@ fn scan_codex_sessions() -> Vec<StoredSessionRecord> {
                                 totals.cached_input_tokens = totals
                                     .cached_input_tokens
                                     .max(info.total_token_usage.cached_input_tokens);
-                                totals.output_tokens =
-                                    totals.output_tokens.max(info.total_token_usage.output_tokens);
+                                totals.output_tokens = totals
+                                    .output_tokens
+                                    .max(info.total_token_usage.output_tokens);
                                 totals.reasoning_output_tokens = totals
                                     .reasoning_output_tokens
                                     .max(info.total_token_usage.reasoning_output_tokens);
@@ -1775,7 +1786,7 @@ pub fn validate_github_token_live(token: &str) -> Result<String, String> {
         .get("https://api.github.com/user")
         .set("Accept", "application/vnd.github+json")
         .set("Authorization", &format!("Bearer {token}"))
-        .set("User-Agent", "ClaudeCodeUsageMonitor")
+        .set("User-Agent", "OpencodeUsageMonitor")
         .set("X-GitHub-Api-Version", "2022-11-28")
         .call()
     {
@@ -1906,7 +1917,15 @@ fn upload_github_file(
     content: &[u8],
     message: &str,
 ) -> Result<(), String> {
-    upload_github_file_with_agent(&github_agent()?, repo, token, branch, path, content, message)
+    upload_github_file_with_agent(
+        &github_agent()?,
+        repo,
+        token,
+        branch,
+        path,
+        content,
+        message,
+    )
 }
 
 fn upload_github_file_with_agent(
@@ -1922,10 +1941,7 @@ fn upload_github_file_with_agent(
 
     let mut body = serde_json::Map::new();
     body.insert("message".to_string(), Value::String(message.to_string()));
-    body.insert(
-        "content".to_string(),
-        Value::String(base64_encode(content)),
-    );
+    body.insert("content".to_string(), Value::String(base64_encode(content)));
     if let Some(branch) = effective_archive_branch(branch) {
         body.insert("branch".to_string(), Value::String(branch));
     }
@@ -1938,7 +1954,7 @@ fn upload_github_file_with_agent(
         .put(&url)
         .set("Accept", "application/vnd.github+json")
         .set("Authorization", &format!("Bearer {token}"))
-        .set("User-Agent", "ClaudeCodeUsageMonitor")
+        .set("User-Agent", "OpencodeUsageMonitor")
         .set("X-GitHub-Api-Version", "2022-11-28")
         .send_json(Value::Object(body))
     {
@@ -1961,7 +1977,7 @@ fn fetch_remote_store(sync: &HistorySyncSettings, token: &str) -> Result<History
         sync.branch.as_deref(),
         "latest/history-store.json",
     )?
-        .ok_or_else(|| "No GitHub history store was found in latest/history-store.json.".to_string())?;
+    .ok_or_else(|| "No GitHub history store was found in latest/history-store.json.".to_string())?;
     let mut store: HistoryStore = serde_json::from_slice(&bytes)
         .map_err(|error| format!("Unable to parse GitHub history store: {error}"))?;
     if store.version == 0 {
@@ -1982,7 +1998,7 @@ fn download_github_file(
         .get(&url)
         .set("Accept", "application/vnd.github.raw+json")
         .set("Authorization", &format!("Bearer {token}"))
-        .set("User-Agent", "ClaudeCodeUsageMonitor")
+        .set("User-Agent", "OpencodeUsageMonitor")
         .set("X-GitHub-Api-Version", "2022-11-28")
         .call()
     {
@@ -2016,7 +2032,7 @@ fn fetch_github_file_sha(
         .get(&url)
         .set("Accept", "application/vnd.github+json")
         .set("Authorization", &format!("Bearer {token}"))
-        .set("User-Agent", "ClaudeCodeUsageMonitor")
+        .set("User-Agent", "OpencodeUsageMonitor")
         .set("X-GitHub-Api-Version", "2022-11-28")
         .call()
     {
@@ -2032,7 +2048,9 @@ fn fetch_github_file_sha(
             github_error_hint(code),
             compact_response_body(response.into_string().unwrap_or_default())
         )),
-        Err(error) => Err(format!("Unable to check existing GitHub file {path}: {error}")),
+        Err(error) => Err(format!(
+            "Unable to check existing GitHub file {path}: {error}"
+        )),
     }
 }
 
@@ -2053,7 +2071,7 @@ fn trigger_report_workflow(
             ))
             .set("Accept", "application/vnd.github+json")
             .set("Authorization", &format!("Bearer {token}"))
-            .set("User-Agent", "ClaudeCodeUsageMonitor")
+            .set("User-Agent", "OpencodeUsageMonitor")
             .set("X-GitHub-Api-Version", "2022-11-28")
             .call()
             .map_err(|error| format!("Unable to read GitHub repo metadata: {error}"))?
@@ -2069,7 +2087,7 @@ fn trigger_report_workflow(
         ))
         .set("Accept", "application/vnd.github+json")
         .set("Authorization", &format!("Bearer {token}"))
-        .set("User-Agent", "ClaudeCodeUsageMonitor")
+        .set("User-Agent", "OpencodeUsageMonitor")
         .set("X-GitHub-Api-Version", "2022-11-28")
         .send_json(serde_json::json!({ "ref": workflow_ref }))
     {
@@ -2105,8 +2123,7 @@ fn compact_response_body(body: String) -> String {
         String::new()
     } else {
         // Strip fields that could leak credentials or internal details.
-        let sanitized = compact
-            .replace(|c: char| c.is_ascii_control(), "");
+        let sanitized = compact.replace(|c: char| c.is_ascii_control(), "");
         format!("- {}", trim_to_chars(&sanitized, 180))
     }
 }
@@ -2202,8 +2219,8 @@ fn base64_encode(bytes: &[u8]) -> String {
 fn url_encode_component(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
-        let is_unreserved = byte.is_ascii_alphanumeric()
-            || matches!(byte, b'-' | b'_' | b'.' | b'~');
+        let is_unreserved =
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~');
         if is_unreserved {
             encoded.push(byte as char);
         } else {
@@ -2302,7 +2319,7 @@ fn project_label(project_path: &str) -> String {
 fn app_data_dir() -> Result<PathBuf, String> {
     dirs::data_dir()
         .or_else(dirs::data_local_dir)
-        .map(|dir| dir.join("ClaudeCodeUsageMonitor"))
+        .map(|dir| dir.join("OpencodeUsageMonitor"))
         .ok_or_else(|| "Unable to determine an application data directory.".to_string())
 }
 
@@ -2338,7 +2355,10 @@ fn archive_conversation_logs(
             branch,
             &file.remote_path,
             &bytes,
-            &format!("Update conversation log {} at {generated_at_unix}", file.remote_path),
+            &format!(
+                "Update conversation log {} at {generated_at_unix}",
+                file.remote_path
+            ),
         )?;
 
         let metadata = std::fs::metadata(&file.local_path).map_err(|error| {
@@ -2443,7 +2463,10 @@ fn conversation_provider_label(remote_path: &str) -> &'static str {
 }
 
 fn system_time_to_unix(value: SystemTime) -> Option<u64> {
-    value.duration_since(UNIX_EPOCH).ok().map(|duration| duration.as_secs())
+    value
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
 }
 
 #[cfg(test)]
@@ -2491,22 +2514,8 @@ mod tests {
             version: HISTORY_STORE_VERSION,
             updated_at_unix: 20,
             sessions: vec![
-                session(
-                    ProviderKind::Codex,
-                    "session-a",
-                    "C:\\repo",
-                    250,
-                    30,
-                    20,
-                ),
-                session(
-                    ProviderKind::Codex,
-                    "session-b",
-                    "C:\\repo",
-                    75,
-                    5,
-                    20,
-                ),
+                session(ProviderKind::Codex, "session-a", "C:\\repo", 250, 30, 20),
+                session(ProviderKind::Codex, "session-b", "C:\\repo", 75, 5, 20),
             ],
         };
 

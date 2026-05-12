@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::os::windows::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -150,10 +150,7 @@ pub fn poll() -> Result<UsageData, PollError> {
 pub fn read_activity_summary() -> Option<ActivitySummary> {
     let path = codex_home_dir().join("history.jsonl");
     let file = std::fs::File::open(path).ok()?;
-    let now_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_secs() as i64;
+    let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
     let cutoff_day = now_secs.saturating_sub(24 * 60 * 60);
     let cutoff_week = now_secs.saturating_sub(7 * 24 * 60 * 60);
 
@@ -229,14 +226,21 @@ fn fetch_usage_via_oauth(credentials: &Credentials) -> Result<UsageData, PollErr
     let url = resolve_usage_url();
     let mut request = agent
         .get(&url)
-        .set("Authorization", &format!("Bearer {}", credentials.access_token))
+        .set(
+            "Authorization",
+            &format!("Bearer {}", credentials.access_token),
+        )
         .set("Accept", "application/json")
         .set(
             "User-Agent",
             concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")),
         );
 
-    if let Some(account_id) = credentials.account_id.as_deref().filter(|value| !value.is_empty()) {
+    if let Some(account_id) = credentials
+        .account_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
         request = request.set("ChatGPT-Account-Id", account_id);
     }
 
@@ -290,13 +294,14 @@ fn fetch_usage_via_rpc() -> Result<UsageData, PollError> {
             plan_name: None,
             source_label: Some("codex-rpc".to_string()),
             updated_at: Some(SystemTime::now()),
+            opencode_windows: None,
         };
 
-        if let Some(account) = account.and_then(|account| account.account) {
-            if let RpcAccount::Chatgpt { email, plan_type } = account {
-                data.account_email = email;
-                data.plan_name = plan_type;
-            }
+        if let Some(RpcAccount::Chatgpt { email, plan_type }) =
+            account.and_then(|account| account.account)
+        {
+            data.account_email = email;
+            data.plan_name = plan_type;
         }
 
         Ok(data)
@@ -343,6 +348,7 @@ fn map_oauth_usage(response: UsageResponse) -> UsageData {
         plan_name: response.plan_type,
         source_label: Some("openai-oauth".to_string()),
         updated_at: Some(SystemTime::now()),
+        opencode_windows: None,
     }
 }
 
@@ -414,9 +420,10 @@ fn resolve_chatgpt_base_url() -> String {
             }
 
             let mut value = value.trim().to_string();
-            if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
-                value = value[1..value.len() - 1].to_string();
-            } else if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
+            if value.len() >= 2
+                && ((value.starts_with('"') && value.ends_with('"'))
+                    || (value.starts_with('\'') && value.ends_with('\'')))
+            {
                 value = value[1..value.len() - 1].to_string();
             }
 
@@ -562,7 +569,7 @@ fn trusted_cli_roots() -> Vec<PathBuf> {
     roots
 }
 
-fn normalize_windows_path(path: &PathBuf) -> String {
+fn normalize_windows_path(path: &Path) -> String {
     path.to_string_lossy()
         .replace('/', "\\")
         .trim_end_matches('\\')
@@ -613,7 +620,7 @@ impl CodexRpcClient {
             "initialize",
             json!({
                 "clientInfo": {
-                    "name": "claude-code-usage-monitor",
+                    "name": "opencode-usage-monitor",
                     "version": env!("CARGO_PKG_VERSION"),
                 }
             }),
@@ -683,7 +690,8 @@ impl CodexRpcClient {
                 continue;
             }
 
-            let value: Value = serde_json::from_str(trimmed).map_err(|_| PollError::RequestFailed)?;
+            let value: Value =
+                serde_json::from_str(trimmed).map_err(|_| PollError::RequestFailed)?;
             return Ok(value);
         }
     }

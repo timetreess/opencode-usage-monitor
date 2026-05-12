@@ -9,8 +9,8 @@ permissions:
   contents: write
 
 env:
-  RELEASE_ASSET_NAME: claude-code-usage-monitor.exe
-  WINGET_PACKAGE_ID: CodeZeno.ClaudeCodeUsageMonitor
+  RELEASE_ASSET_NAME: opencode-usage-monitor.exe
+  WINGET_PACKAGE_ID: CodeZeno.OpencodeUsageMonitor
   WINGETCREATE_VERSION: v1.12.8.0
   WINGETCREATE_SHA256: 8BD738851B524885410112678E3771B341C5C716DE60FBBECB88AB0A363ED85D
 
@@ -30,7 +30,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe
         with:
-          files: target/release/claude-code-usage-monitor.exe
+          files: target/release/opencode-usage-monitor.exe
           generate_release_notes: true
 
   winget:

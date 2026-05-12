@@ -474,17 +474,27 @@ fn extract_usage_from_columns(
     select_columns: &[String],
     token_columns: &TokenColumnSet,
 ) -> rusqlite::Result<TokenWindowUsage> {
-    let mut usage = TokenWindowUsage::default();
-    usage.input_tokens = read_u64_column(row, select_columns, token_columns.input.as_deref())?;
-    usage.output_tokens = read_u64_column(row, select_columns, token_columns.output.as_deref())?;
-    usage.reasoning_output_tokens =
-        read_u64_column(row, select_columns, token_columns.reasoning.as_deref())?;
-    usage.cached_input_tokens =
-        read_u64_column(row, select_columns, token_columns.cache_read.as_deref())?.saturating_add(
-            read_u64_column(row, select_columns, token_columns.cache_write.as_deref())?,
-        );
-    usage.estimated_cost_usd = read_f64_column(row, select_columns, token_columns.cost.as_deref())?;
-    Ok(usage)
+    Ok(TokenWindowUsage {
+        input_tokens: read_u64_column(row, select_columns, token_columns.input.as_deref())?,
+        output_tokens: read_u64_column(row, select_columns, token_columns.output.as_deref())?,
+        reasoning_output_tokens: read_u64_column(
+            row,
+            select_columns,
+            token_columns.reasoning.as_deref(),
+        )?,
+        cached_input_tokens: read_u64_column(
+            row,
+            select_columns,
+            token_columns.cache_read.as_deref(),
+        )?
+        .saturating_add(read_u64_column(
+            row,
+            select_columns,
+            token_columns.cache_write.as_deref(),
+        )?),
+        estimated_cost_usd: read_f64_column(row, select_columns, token_columns.cost.as_deref())?,
+        ..Default::default()
+    })
 }
 
 fn read_u64_column(
@@ -570,7 +580,7 @@ fn json_u64(value: &Value) -> Option<u64> {
     value
         .as_u64()
         .or_else(|| value.as_i64().and_then(|number| u64::try_from(number).ok()))
-        .or_else(|| value.as_f64().and_then(|number| f64_to_u64(number)))
+        .or_else(|| value.as_f64().and_then(f64_to_u64))
         .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
 }
 

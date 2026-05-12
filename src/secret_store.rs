@@ -5,7 +5,7 @@ use windows::Win32::Security::Credentials::{
     CRED_TYPE_GENERIC,
 };
 
-const GITHUB_PAT_TARGET: &str = "ClaudeCodeUsageMonitor/GitHubPAT";
+const GITHUB_PAT_TARGET: &str = "OpencodeUsageMonitor/GitHubPAT";
 const GITHUB_PAT_USERNAME: &str = "github-pat";
 
 pub fn has_github_pat() -> bool {
