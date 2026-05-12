@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use chrono::{Datelike, Local, TimeZone, Utc};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
@@ -175,8 +176,8 @@ fn aggregate_from_connection(
     let now_ms = system_time_to_ms(now);
     let cutoffs = WindowCutoffs {
         five_hour_ms: now_ms.saturating_sub(5 * 60 * 60 * 1000),
-        today_ms: start_of_utc_day_ms(now_ms),
-        month_ms: start_of_utc_month_ms(now_ms),
+        today_ms: start_of_local_day_ms(now_ms),
+        month_ms: start_of_local_month_ms(now_ms),
     };
 
     let mut best_error = false;
@@ -660,41 +661,35 @@ fn system_time_to_ms(time: SystemTime) -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
-fn start_of_utc_day_ms(now_ms: i64) -> i64 {
-    let day_ms = 86_400_000;
-    now_ms.saturating_div(day_ms).saturating_mul(day_ms)
+fn start_of_local_day_ms(now_ms: i64) -> i64 {
+    let local_now = local_datetime_from_ms(now_ms);
+    local_midnight_ms(local_now.year(), local_now.month(), local_now.day())
 }
 
-fn start_of_utc_month_ms(now_ms: i64) -> i64 {
-    let days = now_ms.saturating_div(86_400_000);
-    let (year, month, _) = civil_from_days(days);
-    days_from_civil(year, month, 1).saturating_mul(86_400_000)
+fn start_of_local_month_ms(now_ms: i64) -> i64 {
+    let local_now = local_datetime_from_ms(now_ms);
+    local_midnight_ms(local_now.year(), local_now.month(), 1)
 }
 
-fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
-    let z = days_since_epoch + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = mp + if mp < 10 { 3 } else { -9 };
-    let year = y + if month <= 2 { 1 } else { 0 };
-    (year, month as u32, day as u32)
+fn local_datetime_from_ms(timestamp_ms: i64) -> chrono::DateTime<Local> {
+    let utc = Utc
+        .timestamp_millis_opt(timestamp_ms)
+        .single()
+        .unwrap_or_else(Utc::now);
+    utc.with_timezone(&Local)
 }
 
-fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
-    let year = year - if month <= 2 { 1 } else { 0 };
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let yoe = year - era * 400;
-    let month = month as i64;
-    let day = day as i64;
-    let mp = month + if month > 2 { -3 } else { 9 };
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+fn local_midnight_ms(year: i32, month: u32, day: u32) -> i64 {
+    Local
+        .with_ymd_and_hms(year, month, day, 0, 0, 0)
+        .earliest()
+        .map(|datetime| datetime.timestamp_millis())
+        .unwrap_or_else(|| {
+            diagnose::log(format!(
+                "local midnight conversion failed for {year:04}-{month:02}-{day:02}; falling back to current time"
+            ));
+            system_time_to_ms(SystemTime::now())
+        })
 }
 
 #[cfg(test)]
@@ -733,6 +728,42 @@ mod tests {
     #[test]
     fn normalizes_second_timestamps() {
         assert_eq!(normalize_timestamp_ms(1_700_000_000), 1_700_000_000_000);
+    }
+
+    #[test]
+    fn today_cutoff_uses_os_local_midnight() {
+        let local_now = Local
+            .with_ymd_and_hms(2026, 5, 12, 13, 30, 0)
+            .single()
+            .expect("local test datetime");
+        let expected_midnight = Local
+            .with_ymd_and_hms(2026, 5, 12, 0, 0, 0)
+            .single()
+            .expect("local test midnight")
+            .timestamp_millis();
+
+        assert_eq!(
+            start_of_local_day_ms(local_now.timestamp_millis()),
+            expected_midnight
+        );
+    }
+
+    #[test]
+    fn month_cutoff_uses_os_local_month_start() {
+        let local_now = Local
+            .with_ymd_and_hms(2026, 5, 12, 13, 30, 0)
+            .single()
+            .expect("local test datetime");
+        let expected_month_start = Local
+            .with_ymd_and_hms(2026, 5, 1, 0, 0, 0)
+            .single()
+            .expect("local test month start")
+            .timestamp_millis();
+
+        assert_eq!(
+            start_of_local_month_ms(local_now.timestamp_millis()),
+            expected_month_start
+        );
     }
 
     #[test]
