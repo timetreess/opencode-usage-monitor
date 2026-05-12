@@ -2,7 +2,7 @@
 
 A lightweight Windows taskbar widget for tracking **OpenCode token usage** alongside Claude Code and OpenAI Codex limits.
 
-This project is a fork of [`disc0nnctd/Claude-Code-Usage-Monitor`](https://github.com/disc0nnctd/Claude-Code-Usage-Monitor). The fork keeps the original taskbar-widget idea and Claude/Codex support, then extends it for OpenCode users with local SQLite usage tracking, OpenCode-aware provider switching, tray summaries, and daily token snapshots.
+This project is a fork of [`CodeZeno/Claude-Code-Usage-Monitor`](https://github.com/CodeZeno/Claude-Code-Usage-Monitor). The fork keeps the original taskbar-widget idea and Claude/Codex support, then extends it for OpenCode users with local SQLite usage tracking, OpenCode-aware provider switching, tray summaries, and daily token snapshots.
 
 ![Windows](https://img.shields.io/badge/platform-Windows-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -138,6 +138,6 @@ cargo package --allow-dirty
 
 ## Relationship To The Upstream Project
 
-The upstream project is [`disc0nnctd/Claude-Code-Usage-Monitor`](https://github.com/disc0nnctd/Claude-Code-Usage-Monitor), which focused on Claude Code and Codex usage visibility.
+The upstream project is [`CodeZeno/Claude-Code-Usage-Monitor`](https://github.com/CodeZeno/Claude-Code-Usage-Monitor), which focused on Claude Code and Codex usage visibility.
 
 This fork changes the product direction to OpenCode-first monitoring while preserving the useful provider-limit views from upstream. The code remains MIT licensed.

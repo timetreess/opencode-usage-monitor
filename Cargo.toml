@@ -4,8 +4,8 @@ version = "1.2.6"
 edition = "2021"
 license = "MIT"
 description = "Windows taskbar widget for monitoring OpenCode, Claude Code, and Codex usage"
-homepage = "https://github.com/disc0nnctd/Claude-Code-Usage-Monitor"
-repository = "https://github.com/disc0nnctd/Claude-Code-Usage-Monitor"
+homepage = "https://github.com/CodeZeno/Claude-Code-Usage-Monitor"
+repository = "https://github.com/CodeZeno/Claude-Code-Usage-Monitor"
 
 [package.metadata.winres]
 CompanyName = "Code Zeno Pty Ltd"
