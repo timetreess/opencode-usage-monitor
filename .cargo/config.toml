@@ -1,0 +1,5 @@
+[alias]
+dev-check = "check"
+release-check = "check --release"
+dev-run = "run"
+release-build = "build --release"

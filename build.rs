@@ -1,6 +1,9 @@
 use winres::{VersionInfo, WindowsResource};
 
 fn main() {
+    println!("cargo:rerun-if-changed=src/icons/icon.ico");
+    println!("cargo:rerun-if-env-changed=CARGO_PKG_VERSION");
+
     let version = env!("CARGO_PKG_VERSION");
 
     // Embed the icon and richer PE version metadata into the executable.

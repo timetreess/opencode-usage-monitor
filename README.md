@@ -1,8 +1,8 @@
-# Claude Code + Codex Usage Monitor
+# OpenCode + Claude Code + Codex Usage Monitor
 
-A lightweight Windows taskbar widget for people using Claude Code, OpenAI Codex, or both.
+A lightweight Windows taskbar widget for people using OpenCode, Claude Code, OpenAI Codex, or any combination of them.
 
-It sits in your taskbar and shows how much of your Claude Code or Codex usage window you have left, without needing to open the terminal or the provider site.
+It sits in your taskbar and shows OpenCode token/cost totals from the local SQLite database, while preserving the existing Claude Code and Codex usage windows.
 
 ![Windows](https://img.shields.io/badge/platform-Windows-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -11,39 +11,42 @@ It sits in your taskbar and shows how much of your Claude Code or Codex usage wi
 
 ## What You Get
 
+- OpenCode tracking with **5h**, **today**, and **month** input/output/reasoning/cache token totals and estimated cost
 - Claude Code tracking with **5h** and **7d** usage bars
 - Codex tracking with **5h** and **7d** usage bars
-- A live countdown until the active provider resets
-- Left-click to switch between Claude and Codex
-- Right-click provider summaries including Codex plan, code review, recent prompt/session counts, and last prompt preview
+- A tray icon tooltip with active-provider usage details
+- Left-click to switch between OpenCode, Claude, and Codex
+- Right-click provider summaries including OpenCode monthly token totals, Codex plan, code review, recent prompt/session counts, and last prompt preview
 - A small native widget that lives directly in the Windows taskbar
 - Right-click options for refresh, update frequency, language, startup, and updates
 
 ## Who This Is For
 
-This app is for Windows users who already have **Claude Code**, **Codex**, or both installed and signed in.
+This app is for Windows users who already have **OpenCode**, **Claude Code**, **Codex**, or any combination installed and signed in.
 
-It works best if you want a simple "how close am I to the limit?" display that is always visible, plus a quick menu to inspect recent Codex activity.
+It works best if you want OpenCode local token/cost totals always visible, plus the original Claude/Codex limit display.
 
 ## Requirements
 
 - Windows 10 or Windows 11
+- OpenCode v1.2+ with `%LOCALAPPDATA%\opencode\opencode.db` for OpenCode tracking
 - Claude Code (CLI or App) installed and authenticated for Claude tracking
 - Codex CLI installed and authenticated for Codex tracking
 
 If you use Claude Code through WSL, that is supported too. The monitor can read your Claude Code credentials from Windows or from your WSL environment.
 Codex usage is read from your local `%USERPROFILE%\.codex` data on Windows.
+OpenCode usage is read locally from `%LOCALAPPDATA%\opencode\opencode.db` using a read-only SQLite connection. If the schema cannot be recognized, run with `--diagnose` and inspect the diagnostic log for discovered tables/columns.
 
 ## Install
 
-For now, download the latest `claude-code-usage-monitor.exe` from the [Releases](../../releases) page and run it.
+For now, download the latest `opencode-usage-monitor.exe` from the [Releases](../../releases) page and run it.
 
 WinGet support is on the way and currently waiting on final approval. When that is live, installation will be a one-liner.
 
 Planned command:
 
 ```powershell
-winget install CodeZeno.ClaudeCodeUsageMonitor
+winget install CodeZeno.OpencodeUsageMonitor
 ```
 
 ## Use
@@ -57,14 +60,48 @@ Run the app and it will appear in your taskbar.
 Settings are saved to:
 
 ```text
-%APPDATA%\ClaudeCodeUsageMonitor\settings.json
+%APPDATA%\OpencodeUsageMonitor\settings.json
 ```
 
-To build from source:
+OpenCode daily token snapshots are saved to:
+
+```text
+%APPDATA%\OpencodeUsageMonitor\log\YYYY-MM-DD.md
+%APPDATA%\OpencodeUsageMonitor\log\YYYY-MM-DD.json
+```
+
+Use the right-click **Start with Windows** menu item to toggle startup. The app stores that preference under the current user's Windows Run registry key as `OpencodeUsageMonitor`.
+
+For day-to-day development, prefer `cargo dev-check`. It validates the code without
+linking a new Windows executable, which avoids unnecessary churn in `target\` and
+keeps endpoint-security scans focused on the builds you actually run.
 
 ```powershell
-cargo build --release
+cargo dev-check
 ```
+
+If you specifically want release-profile validation without creating
+`target\release\opencode-usage-monitor.exe`, use:
+
+```powershell
+cargo release-check
+```
+
+When you need to launch the app locally, use the debug build:
+
+```powershell
+cargo dev-run
+```
+
+To build the release executable:
+
+```powershell
+cargo release-build
+```
+
+If your organization uses endpoint-security tooling, use the normal IT-approved
+process for source review, code signing, or allowlisting trusted release artifacts
+instead of disabling or bypassing security controls.
 
 ## Account Support
 
@@ -87,6 +124,7 @@ What the app reads:
 - If needed, the same credentials file inside an installed WSL distro
 - Your local Codex auth file from `~/.codex/auth.json`
 - Your local Codex prompt history from `~/.codex/history.jsonl` for recent-activity summaries
+- Your local OpenCode SQLite database from `%LOCALAPPDATA%\opencode\opencode.db` or `opencode-*.db`
 
 What the app sends over the network:
 
@@ -94,6 +132,7 @@ What the app sends over the network:
 - Requests to OpenAI's Codex usage endpoint to read your Codex limits
 - If needed, a local `codex app-server` probe to read Codex rate limits from the installed CLI
 - Requests to GitHub only if you use the app's update check / self-update feature
+- No network requests are made for OpenCode tracking
 
 What the app stores locally:
 
@@ -117,12 +156,13 @@ Notes:
 
 The monitor:
 
-1. Finds your Claude Code login credentials
-2. Finds your Codex login state and recent local history
-3. Reads your current usage from Anthropic and OpenAI
-4. Falls back to the local Codex CLI rate-limit RPC if the Codex web usage endpoint is unavailable
-5. Shows the active provider directly in the Windows taskbar
-6. Refreshes periodically in the background
+1. Opens the OpenCode SQLite database read-only and autodiscovers token/timestamp data in message tables
+2. Finds your Claude Code login credentials
+3. Finds your Codex login state and recent local history
+4. Reads current Claude/Codex usage from Anthropic and OpenAI
+5. Falls back to the local Codex CLI rate-limit RPC if the Codex web usage endpoint is unavailable
+6. Shows the active provider directly in the Windows taskbar and tray tooltip
+7. Refreshes periodically in the background
 
 If the newer usage endpoint is unavailable, it can fall back to reading the rate-limit headers returned by Claude's Messages API.
 
