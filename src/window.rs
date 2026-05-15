@@ -1226,6 +1226,9 @@ fn begin_update_apply(hwnd: HWND, release: ReleaseDescriptor) {
         let hwnd = send_hwnd.to_hwnd();
         match updater::begin_self_update(&release) {
             Ok(()) => unsafe {
+                diagnose::log(
+                    "update helper launched; closing app so the helper can replace and restart it",
+                );
                 let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
             },
             Err(error) => {
@@ -1473,7 +1476,13 @@ pub fn run() {
     let class_name = native_interop::wide_str("OpencodeUsageMonitor");
 
     unsafe {
-        let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap();
+        let hinstance = match GetModuleHandleW(PCWSTR::null()) {
+            Ok(handle) => handle,
+            Err(error) => {
+                diagnose::log_error("startup aborted: unable to get module handle", error);
+                return;
+            }
+        };
 
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -1500,7 +1509,7 @@ pub fn run() {
 
         // Create as layered popup (will be reparented into taskbar)
         let title = native_interop::wide_str(language.strings().window_title);
-        let hwnd = CreateWindowExW(
+        let hwnd = match CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE,
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
@@ -1513,8 +1522,13 @@ pub fn run() {
             HMENU::default(),
             hinstance,
             None,
-        )
-        .unwrap();
+        ) {
+            Ok(hwnd) => hwnd,
+            Err(error) => {
+                diagnose::log_error("startup aborted: unable to create main window", error);
+                return;
+            }
+        };
         diagnose::log(format!("main window created hwnd={:?}", hwnd));
 
         let is_dark = theme::is_dark_mode();
@@ -1555,7 +1569,10 @@ pub fn run() {
             embedded = true;
 
             let mut state = lock_state();
-            let s = state.as_mut().unwrap();
+            let Some(s) = state.as_mut() else {
+                diagnose::log("startup aborted: app state missing after window creation");
+                return;
+            };
             s.taskbar_hwnd = Some(taskbar_hwnd);
             s.embedded = true;
 
@@ -3080,7 +3097,10 @@ fn show_context_menu(hwnd: HWND) {
             }
         };
 
-        let menu = CreatePopupMenu().unwrap();
+        let Ok(menu) = CreatePopupMenu() else {
+            diagnose::log("unable to create context menu");
+            return;
+        };
 
         let refresh_str = native_interop::wide_str(strings.refresh);
         let _ = AppendMenuW(
@@ -3090,7 +3110,10 @@ fn show_context_menu(hwnd: HWND) {
             PCWSTR::from_raw(refresh_str.as_ptr()),
         );
 
-        let providers_menu = CreatePopupMenu().unwrap();
+        let Ok(providers_menu) = CreatePopupMenu() else {
+            diagnose::log("unable to create providers context menu");
+            return;
+        };
         for (provider, id) in [
             (ProviderKind::Claude, IDM_PROVIDER_CLAUDE),
             (ProviderKind::Codex, IDM_PROVIDER_CODEX),
@@ -3191,7 +3214,10 @@ fn show_context_menu(hwnd: HWND) {
 
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
 
-        let history_menu = CreatePopupMenu().unwrap();
+        let Ok(history_menu) = CreatePopupMenu() else {
+            diagnose::log("unable to create history context menu");
+            return;
+        };
         let open_app_data_str = native_interop::wide_str("Open App Data Folder");
         let _ = AppendMenuW(
             history_menu,
@@ -3237,7 +3263,10 @@ fn show_context_menu(hwnd: HWND) {
         );
         let _ = AppendMenuW(history_menu, MF_SEPARATOR, 0, PCWSTR::null());
 
-        let sync_menu = CreatePopupMenu().unwrap();
+        let Ok(sync_menu) = CreatePopupMenu() else {
+            diagnose::log("unable to create sync context menu");
+            return;
+        };
         append_disabled_menu_line(sync_menu, &archive_repo_line(&history_sync));
         append_disabled_menu_line(sync_menu, &archive_branch_line(&history_sync));
         append_disabled_menu_line(sync_menu, &local_repo_line(&history_sync));
@@ -3343,7 +3372,10 @@ fn show_context_menu(hwnd: HWND) {
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
 
         // Update Frequency submenu
-        let freq_menu = CreatePopupMenu().unwrap();
+        let Ok(freq_menu) = CreatePopupMenu() else {
+            diagnose::log("unable to create frequency context menu");
+            return;
+        };
         let freq_items: [(u16, u32, &str); 4] = [
             (IDM_FREQ_1MIN, POLL_1_MIN, strings.one_minute),
             (IDM_FREQ_5MIN, POLL_5_MIN, strings.five_minutes),
@@ -3374,7 +3406,10 @@ fn show_context_menu(hwnd: HWND) {
         );
 
         // Settings submenu
-        let settings_menu = CreatePopupMenu().unwrap();
+        let Ok(settings_menu) = CreatePopupMenu() else {
+            diagnose::log("unable to create settings context menu");
+            return;
+        };
 
         let startup_str = native_interop::wide_str(strings.start_with_windows);
         let startup_flags = if is_startup_enabled() {
@@ -3397,7 +3432,10 @@ fn show_context_menu(hwnd: HWND) {
             PCWSTR::from_raw(reset_pos_str.as_ptr()),
         );
 
-        let language_menu = CreatePopupMenu().unwrap();
+        let Ok(language_menu) = CreatePopupMenu() else {
+            diagnose::log("unable to create language context menu");
+            return;
+        };
         let system_label = native_interop::wide_str(strings.system_default);
         let system_flags = if language_override.is_none() {
             MF_CHECKED

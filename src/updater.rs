@@ -1,9 +1,9 @@
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use windows::core::PCWSTR;
@@ -63,6 +63,7 @@ pub fn handle_cli_mode(args: &[String]) -> Option<i32> {
         return Some(match apply_update(target, source, pid) {
             Ok(()) => 0,
             Err(error) => {
+                log_update_helper_error(&error);
                 show_error_message("Update failed", &error);
                 1
             }
@@ -155,12 +156,35 @@ fn apply_update(target: PathBuf, source: PathBuf, pid: u32) -> Result<(), String
         ));
     }
 
-    let _ = wait_for_process_exit(pid, Duration::from_secs(30));
+    wait_for_process_exit(pid, Duration::from_secs(30))?;
     replace_target_binary(&target, &source)?;
     relaunch_target(&target)?;
     let _ = std::fs::remove_file(&source);
 
     Ok(())
+}
+
+fn log_update_helper_error(error: &str) {
+    let Some(mut log_dir) = dirs::data_dir() else {
+        return;
+    };
+    log_dir.push("OpencodeUsageMonitor");
+    log_dir.push("log");
+
+    if std::fs::create_dir_all(&log_dir).is_err() {
+        return;
+    }
+
+    let log_path = log_dir.join("update-helper.log");
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) else {
+        return;
+    };
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let _ = writeln!(file, "[{timestamp}] {error}");
 }
 
 fn fetch_latest_release() -> Result<Option<ReleaseDescriptor>, String> {
