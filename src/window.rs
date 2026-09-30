@@ -53,6 +53,7 @@ impl SendHwnd {
 /// Shared application state
 struct AppState {
     hwnd: SendHwnd,
+    taskbar_listener_hwnd: Option<SendHwnd>,
     taskbar_hwnd: Option<HWND>,
     tray_notify_hwnd: Option<HWND>,
     tray_icon_added: bool,
@@ -161,6 +162,7 @@ const WM_APP_UPDATE_CHECK_COMPLETE: u32 = WM_APP + 2;
 
 /// Current system DPI (96 = 100% scaling, 144 = 150%, 192 = 200%, etc.)
 static CURRENT_DPI: AtomicU32 = AtomicU32::new(96);
+static TASKBAR_CREATED_MSG: AtomicU32 = AtomicU32::new(0);
 
 /// Scale a base pixel value (designed at 96 DPI) to the current DPI.
 fn sc(px: i32) -> i32 {
@@ -1532,12 +1534,12 @@ pub fn run() {
         diagnose::log(format!("main window created hwnd={:?}", hwnd));
 
         let is_dark = theme::is_dark_mode();
-        let mut embedded = false;
 
         {
             let mut state = lock_state();
             *state = Some(AppState {
                 hwnd: SendHwnd::from_hwnd(hwnd),
+                taskbar_listener_hwnd: None,
                 taskbar_hwnd: None,
                 tray_notify_hwnd: None,
                 tray_icon_added: false,
@@ -1562,39 +1564,21 @@ pub fn run() {
             });
         }
 
-        // Try to embed in taskbar
-        if let Some(taskbar_hwnd) = native_interop::find_taskbar() {
-            diagnose::log(format!("taskbar found hwnd={:?}", taskbar_hwnd));
-            native_interop::embed_in_taskbar(hwnd, taskbar_hwnd);
-            embedded = true;
+        let taskbar_created = native_interop::wide_str("TaskbarCreated");
+        let taskbar_created_msg =
+            RegisterWindowMessageW(PCWSTR::from_raw(taskbar_created.as_ptr()));
+        TASKBAR_CREATED_MSG.store(taskbar_created_msg, Ordering::Relaxed);
 
+        if let Some(listener_hwnd) = create_taskbar_listener_window(HINSTANCE(hinstance.0)) {
             let mut state = lock_state();
-            let Some(s) = state.as_mut() else {
-                diagnose::log("startup aborted: app state missing after window creation");
-                return;
-            };
-            s.taskbar_hwnd = Some(taskbar_hwnd);
-            s.embedded = true;
-
-            let tray_notify = native_interop::find_child_window(taskbar_hwnd, "TrayNotifyWnd");
-            s.tray_notify_hwnd = tray_notify;
-            if tray_notify.is_some() {
-                diagnose::log("TrayNotifyWnd found");
-            } else {
-                diagnose::log("TrayNotifyWnd not found");
+            if let Some(s) = state.as_mut() {
+                s.taskbar_listener_hwnd = Some(SendHwnd::from_hwnd(listener_hwnd));
             }
+        }
 
-            if let Some(tray_hwnd) = tray_notify {
-                let thread_id = native_interop::get_window_thread_id(tray_hwnd);
-                let hook = native_interop::set_tray_event_hook(thread_id, on_tray_location_changed);
-                s.win_event_hook = hook;
-                if hook.is_some() {
-                    diagnose::log("tray event hook installed");
-                } else {
-                    diagnose::log("tray event hook could not be installed");
-                }
-            }
-        } else {
+        // Try to embed in taskbar
+        let embedded = connect_to_taskbar(hwnd);
+        if !embedded {
             diagnose::log("taskbar not found; using fallback popup window");
         }
 
@@ -2153,6 +2137,30 @@ fn remove_tray_icon() {
 
     let data = build_notify_icon_data(hwnd, "");
     let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &data) };
+    let mut state = lock_state();
+    if let Some(s) = state.as_mut() {
+        s.tray_icon_added = false;
+    }
+}
+
+fn shutdown_window() {
+    remove_tray_icon();
+    let (hook, listener_hwnd) = {
+        let mut state = lock_state();
+        match state.as_mut() {
+            Some(s) => (s.win_event_hook.take(), s.taskbar_listener_hwnd.take()),
+            None => (None, None),
+        }
+    };
+    if let Some(h) = hook {
+        native_interop::unhook_win_event(h);
+    }
+    if let Some(listener) = listener_hwnd {
+        unsafe {
+            let _ = DestroyWindow(listener.to_hwnd());
+        }
+    }
+    unsafe { PostQuitMessage(0) };
 }
 
 fn build_notify_icon_data(hwnd: HWND, tooltip: &str) -> NOTIFYICONDATAW {
@@ -2186,6 +2194,134 @@ fn tray_tooltip_text(state: &AppState) -> String {
         lines.push(provider_raw_usage_line(provider, data));
     }
     lines.join("\n")
+}
+
+fn connect_to_taskbar(hwnd: HWND) -> bool {
+    let Some(taskbar_hwnd) = native_interop::find_taskbar() else {
+        return false;
+    };
+
+    diagnose::log(format!("taskbar found hwnd={:?}", taskbar_hwnd));
+    native_interop::embed_in_taskbar(hwnd, taskbar_hwnd);
+
+    let tray_notify = native_interop::find_child_window(taskbar_hwnd, "TrayNotifyWnd");
+    if tray_notify.is_some() {
+        diagnose::log("TrayNotifyWnd found");
+    } else {
+        diagnose::log("TrayNotifyWnd not found");
+    }
+
+    let hook = tray_notify.and_then(|tray_hwnd| {
+        let thread_id = native_interop::get_window_thread_id(tray_hwnd);
+        native_interop::set_tray_event_hook(thread_id, on_tray_location_changed)
+    });
+
+    let old_hook = {
+        let mut state = lock_state();
+        let Some(s) = state.as_mut() else {
+            diagnose::log("taskbar connection skipped: app state missing");
+            return false;
+        };
+        let old_hook = s.win_event_hook.take();
+        s.taskbar_hwnd = Some(taskbar_hwnd);
+        s.tray_notify_hwnd = tray_notify;
+        s.win_event_hook = hook;
+        s.embedded = true;
+        old_hook
+    };
+
+    if let Some(h) = old_hook {
+        native_interop::unhook_win_event(h);
+    }
+
+    if hook.is_some() {
+        diagnose::log("tray event hook installed");
+    } else {
+        diagnose::log("tray event hook could not be installed");
+    }
+
+    true
+}
+
+fn handle_taskbar_created(hwnd: HWND) {
+    diagnose::log("TaskbarCreated received; reconnecting taskbar widget");
+    if connect_to_taskbar(hwnd) {
+        {
+            let mut state = lock_state();
+            if let Some(s) = state.as_mut() {
+                s.tray_icon_added = false;
+            }
+        }
+        position_at_taskbar();
+        let _ = unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
+        refresh_tray_icon();
+        render_layered();
+    }
+}
+
+fn create_taskbar_listener_window(hinstance: HINSTANCE) -> Option<HWND> {
+    let class_name = native_interop::wide_str("OpencodeUsageMonitorTaskbarListener");
+    let wc = WNDCLASSEXW {
+        cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+        lpfnWndProc: Some(taskbar_listener_wnd_proc),
+        hInstance: hinstance,
+        lpszClassName: PCWSTR::from_raw(class_name.as_ptr()),
+        ..Default::default()
+    };
+
+    unsafe {
+        let atom = RegisterClassExW(&wc);
+        if atom == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
+            diagnose::log("TaskbarCreated listener class registration failed");
+            return None;
+        }
+
+        let title = native_interop::wide_str("OpenCode Usage Monitor Taskbar Listener");
+        match CreateWindowExW(
+            WS_EX_TOOLWINDOW,
+            PCWSTR::from_raw(class_name.as_ptr()),
+            PCWSTR::from_raw(title.as_ptr()),
+            WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            HWND::default(),
+            HMENU::default(),
+            hinstance,
+            None,
+        ) {
+            Ok(hwnd) => {
+                diagnose::log(format!("TaskbarCreated listener created hwnd={:?}", hwnd));
+                Some(hwnd)
+            }
+            Err(error) => {
+                diagnose::log_error("TaskbarCreated listener creation failed", error);
+                None
+            }
+        }
+    }
+}
+
+unsafe extern "system" fn taskbar_listener_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let taskbar_created_msg = TASKBAR_CREATED_MSG.load(Ordering::Relaxed);
+    if taskbar_created_msg != 0 && msg == taskbar_created_msg {
+        let main_hwnd = {
+            let state = lock_state();
+            state.as_ref().map(|s| s.hwnd.to_hwnd())
+        };
+        if let Some(main_hwnd) = main_hwnd {
+            handle_taskbar_created(main_hwnd);
+        }
+        return LRESULT(0);
+    }
+
+    DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
 fn position_at_taskbar() {
@@ -2301,6 +2437,12 @@ unsafe extern "system" fn wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    let taskbar_created_msg = TASKBAR_CREATED_MSG.load(Ordering::Relaxed);
+    if taskbar_created_msg != 0 && msg == taskbar_created_msg {
+        handle_taskbar_created(hwnd);
+        return LRESULT(0);
+    }
+
     match msg {
         WM_PAINT => {
             // For non-embedded fallback, paint normally
@@ -2603,15 +2745,7 @@ unsafe extern "system" fn wnd_proc(
                     }
                 }
                 2 => {
-                    remove_tray_icon();
-                    let hook = {
-                        let state = lock_state();
-                        state.as_ref().and_then(|s| s.win_event_hook)
-                    };
-                    if let Some(h) = hook {
-                        native_interop::unhook_win_event(h);
-                    }
-                    PostQuitMessage(0);
+                    shutdown_window();
                 }
                 IDM_RESET_POSITION => {
                     {
@@ -3036,16 +3170,12 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_DESTROY => {
-            remove_tray_icon();
-            let hook = {
-                let state = lock_state();
-                state.as_ref().and_then(|s| s.win_event_hook)
-            };
-            if let Some(h) = hook {
-                native_interop::unhook_win_event(h);
-            }
-            PostQuitMessage(0);
+            shutdown_window();
             LRESULT(0)
+        }
+        WM_NCDESTROY => {
+            shutdown_window();
+            DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
