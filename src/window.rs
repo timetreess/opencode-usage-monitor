@@ -2550,7 +2550,7 @@ unsafe extern "system" fn wnd_proc(
             position_at_taskbar();
             render_layered();
             LRESULT(0)
-        },
+        }
         WM_SETCURSOR => {
             let is_dragging = {
                 let state = lock_state();
@@ -2622,8 +2622,7 @@ unsafe extern "system" fn wnd_proc(
                     })
                 });
                 if let Some((taskbar_rect, tray_left)) = geometry {
-                    let max_offset =
-                        (tray_left - taskbar_rect.left - total_widget_width()).max(0);
+                    let max_offset = (tray_left - taskbar_rect.left - total_widget_width()).max(0);
                     new_offset = new_offset.min(max_offset);
                 }
 
