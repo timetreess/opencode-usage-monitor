@@ -18,7 +18,7 @@ jobs:
   publish:
     # Main-branch releases are explicit: squash a PR with title "release: vX.Y.Z".
     # Manual v* tags remain supported. A release is only published after validation.
-    if: github.ref_type == 'tag' || startsWith(github.event.head_commit.message, 'release: v')
+    if: "github.ref_type == 'tag' || startsWith(github.event.head_commit.message, 'release: v')"
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
