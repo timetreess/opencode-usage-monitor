@@ -17,7 +17,7 @@ Comments = "https://github.com/timetreess/opencode-usage-monitor"
 LegalCopyright = "Copyright (C) 2026 Code Zeno Pty Ltd"
 
 [dependencies]
-ureq = { version = "2", default-features = false, features = ["native-tls", "json"] }
+ureq = { version = "3", default-features = false, features = ["native-tls", "json"] }
 native-tls = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
