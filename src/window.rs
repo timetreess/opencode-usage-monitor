@@ -1,7 +1,7 @@
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
@@ -159,10 +159,21 @@ const DIVIDER_HIT_ZONE: i32 = 13; // LEFT_DIVIDER_W + DIVIDER_RIGHT_MARGIN
 
 const WM_DPICHANGED_MSG: u32 = 0x02E0;
 const WM_APP_UPDATE_CHECK_COMPLETE: u32 = WM_APP + 2;
+const WM_APP_REPOSITION: u32 = WM_APP + 4;
 
 /// Current system DPI (96 = 100% scaling, 144 = 150%, 192 = 200%, etc.)
 static CURRENT_DPI: AtomicU32 = AtomicU32::new(96);
 static TASKBAR_CREATED_MSG: AtomicU32 = AtomicU32::new(0);
+static POLL_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// Clear the in-flight marker even if a provider poll panics.
+struct PollGuard;
+
+impl Drop for PollGuard {
+    fn drop(&mut self) {
+        POLL_IN_PROGRESS.store(false, Ordering::Release);
+    }
+}
 
 /// Scale a base pixel value (designed at 96 DPI) to the current DPI.
 fn sc(px: i32) -> i32 {
@@ -1947,6 +1958,12 @@ fn paint_content(hdc: HDC, args: PaintContentArgs<'_>) {
 }
 
 fn do_poll(send_hwnd: SendHwnd) {
+    // A slow provider request must not spawn another request on every timer tick.
+    if POLL_IN_PROGRESS.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let _poll_guard = PollGuard;
+
     let hwnd = send_hwnd.to_hwnd();
     let provider = {
         let state = lock_state();
@@ -1955,30 +1972,30 @@ fn do_poll(send_hwnd: SendHwnd) {
             .map(|s| s.active_provider)
             .unwrap_or(ProviderKind::OpenCode)
     };
-    let handle = std::thread::spawn(move || provider_adapter::poll_provider(provider));
 
+    // Poll without holding STATE: the UI must remain responsive while a
+    // network request or SQLite read is waiting.
+    let result = provider_adapter::poll_provider(provider);
     let mut any_ok = false;
     let mut needs_fast_reset_poll = false;
 
     {
         let mut state = lock_state();
         if let Some(s) = state.as_mut() {
-            if let Ok(result) = handle.join() {
-                provider_state_mut(s, result.provider).activity = result.activity.clone();
-                match result.data {
-                    Ok(data) => {
-                        if result.provider != ProviderKind::OpenCode {
-                            needs_fast_reset_poll |= poller::is_past_reset(&data);
-                        }
-                        set_provider_data(s, result.provider, data, result.activity);
-                        any_ok = true;
+            provider_state_mut(s, result.provider).activity = result.activity.clone();
+            match result.data {
+                Ok(data) => {
+                    if result.provider != ProviderKind::OpenCode {
+                        needs_fast_reset_poll = poller::is_past_reset(&data);
                     }
-                    Err(provider_adapter::ProviderPollError::Unavailable) => {
-                        set_provider_unavailable(s, result.provider);
-                    }
-                    Err(provider_adapter::ProviderPollError::Loading) => {
-                        set_provider_loading(s, result.provider);
-                    }
+                    set_provider_data(s, result.provider, data, result.activity);
+                    any_ok = true;
+                }
+                Err(provider_adapter::ProviderPollError::Unavailable) => {
+                    set_provider_unavailable(s, result.provider);
+                }
+                Err(provider_adapter::ProviderPollError::Loading) => {
+                    set_provider_loading(s, result.provider);
                 }
             }
 
@@ -1995,7 +2012,6 @@ fn do_poll(send_hwnd: SendHwnd) {
                 let backoff = RETRY_BASE_MS
                     .saturating_mul(1u32.checked_shl(s.retry_count - 1).unwrap_or(u32::MAX));
                 let retry_ms = backoff.min(s.poll_interval_ms);
-
                 unsafe {
                     SetTimer(hwnd, TIMER_POLL, retry_ms, None);
                 }
@@ -2004,13 +2020,11 @@ fn do_poll(send_hwnd: SendHwnd) {
     }
 
     unsafe {
-        // Show refresh indicator — retry will recover silently
         if needs_fast_reset_poll {
             SetTimer(hwnd, TIMER_RESET_POLL, 5_000, None);
         } else {
             let _ = KillTimer(hwnd, TIMER_RESET_POLL);
         }
-
         let _ = PostMessageW(hwnd, WM_APP_USAGE_UPDATED, WPARAM(0), LPARAM(0));
     }
 }
@@ -2326,27 +2340,19 @@ unsafe extern "system" fn taskbar_listener_wnd_proc(
 
 fn position_at_taskbar() {
     refresh_dpi();
-    let state = lock_state();
-    let s = match state.as_ref() {
-        Some(s) => s,
-        None => return,
-    };
-
-    // Don't fight the user's drag
-    if s.dragging {
-        return;
-    }
-
-    let hwnd = s.hwnd.to_hwnd();
-    let embedded = s.embedded;
-    let tray_offset = s.tray_offset;
-
-    let taskbar_hwnd = match s.taskbar_hwnd {
-        Some(h) => h,
-        None => {
-            diagnose::log("position_at_taskbar skipped: no taskbar handle");
+    // Window movement can synchronously dispatch window messages. Never keep
+    // STATE locked while querying the shell or calling MoveWindow.
+    let (hwnd, embedded, tray_offset, taskbar_hwnd) = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else { return };
+        if s.dragging {
             return;
         }
+        let Some(taskbar_hwnd) = s.taskbar_hwnd else {
+            diagnose::log("position_at_taskbar skipped: no taskbar handle");
+            return;
+        };
+        (s.hwnd.to_hwnd(), s.embedded, s.tray_offset, taskbar_hwnd)
     };
 
     let taskbar_rect = match native_interop::get_taskbar_rect(taskbar_hwnd) {
@@ -2424,8 +2430,15 @@ unsafe extern "system" fn on_tray_location_changed(
             }
         };
         if should_reposition {
-            position_at_taskbar();
-            render_layered();
+            // Defer shell calls and painting until the normal window message
+            // loop, rather than doing them inside a WinEvent callback.
+            let main_hwnd = {
+                let state = lock_state();
+                state.as_ref().map(|s| s.hwnd.to_hwnd())
+            };
+            if let Some(main_hwnd) = main_hwnd {
+                let _ = PostMessageW(main_hwnd, WM_APP_REPOSITION, WPARAM(0), LPARAM(0));
+            }
         }
     }
 }
@@ -2533,6 +2546,11 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_APP_UPDATE_CHECK_COMPLETE => LRESULT(0),
+        WM_APP_REPOSITION => {
+            position_at_taskbar();
+            render_layered();
+            LRESULT(0)
+        }
         WM_SETCURSOR => {
             let is_dragging = {
                 let state = lock_state();
@@ -2574,89 +2592,66 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
-            let is_dragging = {
+            let drag = {
                 let state = lock_state();
-                state.as_ref().map(|s| s.dragging).unwrap_or(false)
+                state.as_ref().and_then(|s| {
+                    s.dragging.then_some((
+                        s.drag_start_mouse_x,
+                        s.drag_start_offset,
+                        s.taskbar_hwnd,
+                        s.hwnd.to_hwnd(),
+                        s.embedded,
+                    ))
+                })
             };
-            if is_dragging {
+            if let Some((start_x, start_offset, taskbar_hwnd, widget_hwnd, embedded)) = drag {
                 let mut pt = POINT::default();
                 let _ = GetCursorPos(&mut pt);
+                // Moving left increases the offset; never permit a negative offset.
+                let delta = start_x - pt.x;
+                let mut new_offset = start_offset.saturating_add(delta).max(0);
 
-                let mut state = lock_state();
-                let s = match state.as_mut() {
-                    Some(s) => s,
-                    None => return LRESULT(0),
-                };
-
-                // Moving mouse left = positive delta = larger offset (further left)
-                let delta = s.drag_start_mouse_x - pt.x;
-                let mut new_offset = s.drag_start_offset + delta;
-
-                // Clamp: offset >= 0 (can't go right of default)
-                if new_offset < 0 {
-                    new_offset = 0;
+                let geometry = taskbar_hwnd.and_then(|taskbar_hwnd| {
+                    native_interop::get_taskbar_rect(taskbar_hwnd).map(|taskbar_rect| {
+                        let tray_left =
+                            native_interop::find_child_window(taskbar_hwnd, "TrayNotifyWnd")
+                                .and_then(native_interop::get_window_rect_safe)
+                                .map(|rect| rect.left)
+                                .unwrap_or(taskbar_rect.right);
+                        (taskbar_rect, tray_left)
+                    })
+                });
+                if let Some((taskbar_rect, tray_left)) = geometry {
+                    let max_offset = (tray_left - taskbar_rect.left - total_widget_width()).max(0);
+                    new_offset = new_offset.min(max_offset);
                 }
 
-                // Clamp: don't go past left edge of taskbar
-                if let Some(taskbar_hwnd) = s.taskbar_hwnd {
-                    if let Some(taskbar_rect) = native_interop::get_taskbar_rect(taskbar_hwnd) {
-                        let mut tray_left = taskbar_rect.right;
-                        if let Some(tray_hwnd) =
-                            native_interop::find_child_window(taskbar_hwnd, "TrayNotifyWnd")
-                        {
-                            if let Some(tray_rect) = native_interop::get_window_rect_safe(tray_hwnd)
-                            {
-                                tray_left = tray_rect.left;
-                            }
-                        }
-                        let widget_width = total_widget_width();
-                        let max_offset = tray_left - taskbar_rect.left - widget_width;
-                        if new_offset > max_offset {
-                            new_offset = max_offset;
+                {
+                    let mut state = lock_state();
+                    if let Some(s) = state.as_mut() {
+                        if s.dragging {
+                            s.tray_offset = new_offset;
                         }
                     }
                 }
 
-                s.tray_offset = new_offset;
-
-                // Move window directly
-                let hwnd_val = s.hwnd.to_hwnd();
-                if let Some(taskbar_hwnd) = s.taskbar_hwnd {
-                    if let Some(taskbar_rect) = native_interop::get_taskbar_rect(taskbar_hwnd) {
-                        let taskbar_height = taskbar_rect.bottom - taskbar_rect.top;
-                        let mut tray_left = taskbar_rect.right;
-                        if let Some(tray_hwnd) =
-                            native_interop::find_child_window(taskbar_hwnd, "TrayNotifyWnd")
-                        {
-                            if let Some(tray_rect) = native_interop::get_window_rect_safe(tray_hwnd)
-                            {
-                                tray_left = tray_rect.left;
-                            }
-                        }
-                        let widget_width = total_widget_width();
-                        let widget_height = sc(WIDGET_HEIGHT);
-                        if s.embedded {
-                            let x = tray_left - taskbar_rect.left - widget_width - new_offset;
-                            let y = (taskbar_height - widget_height) / 2;
-                            native_interop::move_window(
-                                hwnd_val,
-                                x,
-                                y,
-                                widget_width,
-                                widget_height,
-                            );
-                        } else {
-                            let x = tray_left - widget_width - new_offset;
-                            let y = taskbar_rect.top + (taskbar_height - widget_height) / 2;
-                            native_interop::move_window(
-                                hwnd_val,
-                                x,
-                                y,
-                                widget_width,
-                                widget_height,
-                            );
-                        }
-                    }
+                // A synchronous MoveWindow must happen outside the state lock.
+                if let Some((taskbar_rect, tray_left)) = geometry {
+                    let widget_width = total_widget_width();
+                    let widget_height = sc(WIDGET_HEIGHT);
+                    let taskbar_height = taskbar_rect.bottom - taskbar_rect.top;
+                    let (x, y) = if embedded {
+                        (
+                            tray_left - taskbar_rect.left - widget_width - new_offset,
+                            (taskbar_height - widget_height) / 2,
+                        )
+                    } else {
+                        (
+                            tray_left - widget_width - new_offset,
+                            taskbar_rect.top + (taskbar_height - widget_height) / 2,
+                        )
+                    };
+                    native_interop::move_window(widget_hwnd, x, y, widget_width, widget_height);
                 }
             }
             LRESULT(0)
