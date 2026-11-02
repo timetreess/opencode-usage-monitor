@@ -290,7 +290,7 @@ fn file_has_mz_header(path: &Path) -> Result<bool, String> {
         return Ok(false);
     }
 
-    Ok(header == [b'M', b'Z'])
+    Ok(header == *b"MZ")
 }
 
 fn verify_downloaded_update_signature(path: &Path) -> Result<(), String> {
