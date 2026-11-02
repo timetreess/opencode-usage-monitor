@@ -108,7 +108,7 @@ For an actual release, commit first and then run `cargo package` without `--allo
 - GitHub Actions release workflow: `.github/workflows/release.yml`
 - Trigger: push a tag matching `v*`
 - Release asset name: `opencode-usage-monitor.exe`
-- WinGet package ID: `CodeZeno.OpencodeUsageMonitor`
+- WinGet distribution: not published for this fork. The release workflow contains a legacy placeholder identifier; register a fork-specific package before enabling submission.
 - Portable installs self-update from the latest GitHub release asset.
 
 Before tagging a release:
@@ -127,7 +127,7 @@ Keep these names aligned across code, docs, and release workflow:
 - Windows resource product name: `OpenCode Usage Monitor`
 - App data folder: `OpencodeUsageMonitor`
 - Startup registry key: `OpencodeUsageMonitor`
-- WinGet package ID: `CodeZeno.OpencodeUsageMonitor`
+- WinGet distribution: not published for this fork. The release workflow contains a legacy placeholder identifier; register a fork-specific package before enabling submission.
 
 Search for old names before release:
 

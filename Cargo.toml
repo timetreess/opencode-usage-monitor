@@ -4,16 +4,16 @@ version = "1.2.6"
 edition = "2021"
 license = "MIT"
 description = "Windows taskbar widget for monitoring OpenCode, Claude Code, and Codex usage"
-homepage = "https://github.com/CodeZeno/Claude-Code-Usage-Monitor"
-repository = "https://github.com/CodeZeno/Claude-Code-Usage-Monitor"
+homepage = "https://github.com/timetreess/opencode-usage-monitor"
+repository = "https://github.com/timetreess/opencode-usage-monitor"
 
 [package.metadata.winres]
-CompanyName = "Code Zeno Pty Ltd"
+CompanyName = "OpenCode Usage Monitor contributors"
 ProductName = "OpenCode Usage Monitor"
 FileDescription = "Windows taskbar widget for monitoring OpenCode, Claude Code, and Codex usage"
 OriginalFilename = "opencode-usage-monitor.exe"
 InternalName = "OpencodeUsageMonitor"
-Comments = "https://codezeno.com.au"
+Comments = "https://github.com/timetreess/opencode-usage-monitor"
 LegalCopyright = "Copyright (C) 2026 Code Zeno Pty Ltd"
 
 [dependencies]

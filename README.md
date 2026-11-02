@@ -33,11 +33,14 @@ OpenCode tracking is local-only: the app opens `%LOCALAPPDATA%\opencode\opencode
 
 Download the latest `opencode-usage-monitor.exe` from the [Releases](../../releases) page and run it.
 
-WinGet support is planned under:
+This fork is **not currently published to WinGet**. The upstream WinGet package
+is a different application; do not use it as an installer for this fork.
 
-```powershell
-winget install CodeZeno.OpencodeUsageMonitor
-```
+**Portable update limitation:** the in-app updater currently requires an
+Authenticode-signed executable from the original Code Zeno publisher. This fork's
+unsigned GitHub release binaries do not meet that policy. Until a fork-specific,
+verifiable release-signing process is implemented, update manually from this
+repository's Releases page. Do not disable signature checks on managed computers.
 
 ## Use
 
@@ -133,8 +136,9 @@ cargo package --allow-dirty
 
 - GitHub Releases are created by pushing a `v*` tag.
 - The release workflow builds `target/release/opencode-usage-monitor.exe`.
-- WinGet submission uses `CodeZeno.OpencodeUsageMonitor` when `WINGETCREATE_GITHUB_TOKEN` is configured.
-- Portable installs can self-update from the latest GitHub release asset.
+- The existing WinGet workflow retains a legacy placeholder package identifier. No WinGet package is claimed for this fork; configure and register a correct package identifier before enabling submission.
+- The update-check endpoint is this fork's GitHub Releases API (derived from Cargo package metadata).
+- Automatic installation requires a valid Authenticode signature from the original publisher and therefore **does not work for unsigned fork releases**; install those manually.
 
 ## Relationship To The Upstream Project
 
