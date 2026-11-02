@@ -1,6 +1,6 @@
 [package]
 name = "opencode-usage-monitor"
-version = "1.2.6"
+version = "1.2.7"
 edition = "2021"
 license = "MIT"
 description = "Windows taskbar widget for monitoring OpenCode, Claude Code, and Codex usage"
