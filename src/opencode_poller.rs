@@ -179,10 +179,16 @@ fn aggregate_from_connection(
         today_ms: start_of_local_day_ms(now_ms),
         month_ms: start_of_local_month_ms(now_ms),
     };
+    // At the start of a month the rolling five-hour window begins before
+    // the calendar window, so query the union of all displayed windows.
+    let query_cutoff_ms = cutoffs
+        .five_hour_ms
+        .min(cutoffs.today_ms)
+        .min(cutoffs.month_ms);
 
     let mut best_error = false;
     for candidate in candidates {
-        match read_candidate_rows(conn, &candidate, cutoffs.month_ms) {
+        match read_candidate_rows(conn, &candidate, query_cutoff_ms) {
             Ok(rows) => {
                 diagnose::log(format!(
                     "OpenCode candidate {} score {} yielded {} usage rows",
@@ -723,6 +729,60 @@ mod tests {
         assert_eq!(windows.five_hour.reasoning_output_tokens, 25);
         assert_eq!(windows.five_hour.cached_input_tokens, 15);
         assert!(windows.five_hour.estimated_cost_usd > 0.012);
+    }
+
+    #[test]
+    fn five_hour_window_spans_local_month_boundary() {
+        let now_ms = Local
+            .with_ymd_and_hms(2026, 5, 1, 1, 0, 0)
+            .single()
+            .expect("local month boundary")
+            .timestamp_millis();
+        let hour_ms = 60 * 60 * 1000;
+
+        // Both supported timestamp units must retain the previous month's
+        // portion of the rolling window without adding it to today/month.
+        for timestamp_divisor in [1, 1000] {
+            let conn = Connection::open_in_memory().expect("in-memory db");
+            conn.execute(
+                "CREATE TABLE usage (time_created INTEGER NOT NULL, input_tokens INTEGER, cost REAL)",
+                [],
+            )
+            .expect("create usage table");
+            for (timestamp_ms, tokens) in [
+                (now_ms - 6 * hour_ms, 1000),
+                (now_ms - 5 * hour_ms, 10),
+                (now_ms - 2 * hour_ms, 20),
+                (now_ms, 40),
+            ] {
+                conn.execute(
+                    "INSERT INTO usage VALUES (?1, ?2, ?3)",
+                    (
+                        timestamp_ms / timestamp_divisor,
+                        tokens,
+                        tokens as f64 / 100.0,
+                    ),
+                )
+                .expect("insert usage");
+            }
+
+            let windows =
+                aggregate_from_connection(&conn, UNIX_EPOCH + Duration::from_millis(now_ms as u64))
+                    .expect("aggregate across month boundary");
+            assert_eq!(windows.five_hour.input_tokens, 70);
+            assert!((windows.five_hour.estimated_cost_usd - 0.7).abs() < 1e-9);
+            assert_eq!(windows.today.input_tokens, 40);
+            assert_eq!(windows.month.input_tokens, 40);
+
+            conn.execute("DELETE FROM usage WHERE input_tokens = 40", [])
+                .expect("remove current-month usage");
+            let windows =
+                aggregate_from_connection(&conn, UNIX_EPOCH + Duration::from_millis(now_ms as u64))
+                    .expect("previous-month rolling usage still makes the provider available");
+            assert_eq!(windows.five_hour.input_tokens, 30);
+            assert_eq!(windows.today.total_tokens(), 0);
+            assert_eq!(windows.month.total_tokens(), 0);
+        }
     }
 
     #[test]
