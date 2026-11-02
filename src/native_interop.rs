@@ -1,7 +1,6 @@
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
-use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_GETTASKBARPOS, APPBARDATA};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 // Window style constants
@@ -50,20 +49,12 @@ pub fn find_child_window(parent: HWND, class_name: &str) -> Option<HWND> {
     }
 }
 
-/// Get taskbar position via SHAppBarMessage
+/// Read the actual taskbar window bounds without asking Explorer to process
+/// an appbar message. SHAppBarMessage(ABM_GETTASKBARPOS) may hang when the
+/// shell is unresponsive; GetWindowRect does not send a message to Explorer.
 pub fn get_taskbar_rect(taskbar_hwnd: HWND) -> Option<RECT> {
-    unsafe {
-        let mut abd = APPBARDATA {
-            cbSize: std::mem::size_of::<APPBARDATA>() as u32,
-            hWnd: taskbar_hwnd,
-            ..Default::default()
-        };
-        let result = SHAppBarMessage(ABM_GETTASKBARPOS, &mut abd);
-        if result == 0 {
-            return None;
-        }
-        Some(abd.rc)
-    }
+    get_window_rect_safe(taskbar_hwnd)
+        .filter(|rect| rect.right > rect.left && rect.bottom > rect.top)
 }
 
 /// Get the bounding rectangle of a window
